@@ -12,6 +12,7 @@ import glob
 import os
 import subprocess
 import time
+import threading
 import logging
 import sys
 
@@ -30,10 +31,12 @@ LOCAL_CACHE = "/data/cache"
 LAST_SYNC_FILE = "/data/last_sync.txt"
 MPV_SOCKET = "/tmp/mpv-socket"
 CONFIG_LOCAL = "/data/config_local.json"
+WIFI_STATUS_CACHE = {"timestamp": 0.0, "expected_ssid": None, "value": {"state": "warning", "message": "WiFi connection unavailable"}}
+WIFI_STATUS_LOCK = threading.Lock()
 
 
 def read_config() -> dict:
-    defaults = {"playback_fps": 25, "display_brightness": 100}
+    defaults = {"playback_fps": 25, "display_brightness": 100, "wifi_ssid": "timelapse-ap"}
     for path in ["/mnt/timelapse/../config.json", CONFIG_LOCAL]:
         try:
             real = os.path.realpath(path)
@@ -108,6 +111,58 @@ def get_last_sync() -> str:
         return ""
 
 
+def get_wifi_ssid() -> str:
+    try:
+        result = subprocess.run(["iwgetid", "-r"], capture_output=True, text=True, timeout=5)
+        return result.stdout.strip() if result.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
+def get_wifi_ip() -> str:
+    try:
+        result = subprocess.run(["ip", "-4", "-o", "addr", "show", "wlan0"], capture_output=True, text=True, timeout=5)
+        if result.returncode != 0:
+            return ""
+        parts = result.stdout.split()
+        if "inet" in parts:
+            return parts[parts.index("inet") + 1].split("/", 1)[0]
+    except Exception:
+        return ""
+    return ""
+
+
+def get_wifi_status(expected_ssid: str) -> dict:
+    now = time.time()
+    with WIFI_STATUS_LOCK:
+        if (
+            WIFI_STATUS_CACHE["expected_ssid"] == expected_ssid
+            and now - WIFI_STATUS_CACHE["timestamp"] < 5
+        ):
+            return dict(WIFI_STATUS_CACHE["value"])
+    current_ssid = get_wifi_ssid()
+    current_ip = get_wifi_ip()
+    if current_ssid and current_ssid == expected_ssid:
+        details = current_ssid
+        if current_ip:
+            details += f" ({current_ip})"
+        value = {"state": "ok", "message": details}
+    elif current_ssid:
+        details = f"Connected to {current_ssid}"
+        if current_ip:
+            details += f" ({current_ip})"
+        if expected_ssid:
+            details += f", expected {expected_ssid}"
+        value = {"state": "warning", "message": details}
+    elif expected_ssid:
+        value = {"state": "warning", "message": f"Not connected to {expected_ssid}"}
+    else:
+        value = {"state": "warning", "message": "WiFi connection unavailable"}
+    with WIFI_STATUS_LOCK:
+        WIFI_STATUS_CACHE.update({"timestamp": now, "expected_ssid": expected_ssid, "value": value})
+    return dict(value)
+
+
 def get_playback_state() -> str:
     """Check if mpv is running."""
     try:
@@ -146,6 +201,7 @@ def status():
     cfg = read_config()
     frame_current, frame_total = get_frame_info()
     used, total = get_disk_usage()
+    wifi_status = get_wifi_status(cfg.get("wifi_ssid", ""))
     return jsonify({
         "frame_current": frame_current,
         "frame_total": frame_total,
@@ -157,6 +213,8 @@ def status():
         "last_sync_timestamp": get_last_sync(),
         "session_id": get_session_id(),
         "fps": cfg.get("playback_fps", 25),
+        "wifi_state": wifi_status["state"],
+        "wifi_message": wifi_status["message"],
     })
 
 
@@ -219,9 +277,20 @@ def resume():
 @app.route("/playback/reload", methods=["POST"])
 def reload_playback():
     """Restart the playback service to re-read config."""
-    subprocess.run(["systemctl", "restart", "playback.service"],
-                   capture_output=True, timeout=10)
+    result = subprocess.run(["systemctl", "restart", "playback.service"],
+                            capture_output=True, text=True, timeout=10)
+    if result.returncode != 0:
+        return jsonify({"error": result.stderr.strip() or "Failed to restart playback.service"}), 500
     return jsonify({"ok": True, "message": "Playback service restarting"})
+
+
+@app.route("/sync/now", methods=["POST"])
+def sync_now():
+    result = subprocess.run(["systemctl", "restart", "sync.service"],
+                            capture_output=True, text=True, timeout=10)
+    if result.returncode != 0:
+        return jsonify({"error": result.stderr.strip() or "Failed to restart sync.service"}), 500
+    return jsonify({"ok": True, "message": "Sync service restarting"})
 
 
 if __name__ == "__main__":

@@ -10,6 +10,7 @@ session management, and system monitoring.
 import json
 import os
 import glob
+import heapq
 import shutil
 import subprocess
 import time
@@ -41,6 +42,8 @@ LAST_CAPTURE = "/data/last_capture.txt"
 LAST_BACKUP = "/data/last_backup.txt"
 BACKUP_WARNING = "/data/backup_warning.flag"
 DISK_WARNING = "/data/disk_warning.flag"
+HOSTAPD_CONF = "/etc/hostapd/hostapd.conf"
+SESSION_NOTE_FILE = "session_note.txt"
 
 # ── config helpers ───────────────────────────────────────────────────────────
 
@@ -145,13 +148,26 @@ def get_disk_usage(path: str) -> dict:
         free = st.f_bfree * st.f_frsize
         used = total - free
         return {
+            "path": path,
             "total_gb": round(total / 1e9, 1),
             "used_gb": round(used / 1e9, 1),
             "free_gb": round(free / 1e9, 1),
+            "total_bytes": total,
+            "used_bytes": used,
+            "free_bytes": free,
             "percent": round(used / total * 100, 1) if total else 0,
         }
     except Exception:
-        return {"total_gb": 0, "used_gb": 0, "free_gb": 0, "percent": 0}
+        return {
+            "path": path,
+            "total_gb": 0,
+            "used_gb": 0,
+            "free_gb": 0,
+            "total_bytes": 0,
+            "used_bytes": 0,
+            "free_bytes": 0,
+            "percent": 0,
+        }
 
 
 def count_frames(directory: str) -> int:
@@ -174,6 +190,157 @@ def get_session_id() -> str:
         return "unknown"
 
 
+def read_key_value_file(path: str) -> dict:
+    values = {}
+    try:
+        with open(path) as f:
+            for raw_line in f:
+                line = raw_line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                values[key.strip()] = value.strip().strip('"')
+    except Exception:
+        return {}
+    return values
+
+
+def build_status(level: str, label: str, message: str) -> dict:
+    badge_class = {
+        "ok": "badge-ok",
+        "warning": "badge-warn",
+        "error": "badge-err",
+    }.get(level, "badge-off")
+    return {
+        "level": level,
+        "label": label,
+        "message": message,
+        "badge_class": badge_class,
+        "needs_attention": level in {"warning", "error"},
+    }
+
+
+def get_pi1_wifi_status(cfg: dict) -> dict:
+    applied = read_key_value_file(HOSTAPD_CONF)
+    applied_ssid = applied.get("ssid", "")
+    applied_password = applied.get("wpa_passphrase", "")
+    configured_ssid = cfg.get("wifi_ssid", "")
+    configured_password = cfg.get("wifi_password", "")
+    if not applied_ssid:
+        return build_status(
+            "warning",
+            "Unavailable",
+            "Pi 1 setup still needs to be run once so the access-point settings can be applied.",
+        )
+    if applied_ssid != configured_ssid or applied_password != configured_password:
+        return build_status(
+            "warning",
+            "Pending",
+            f"Pi 1 setup still needs to be rerun to switch the AP from “{applied_ssid}” to “{configured_ssid}”.",
+        )
+    return build_status("ok", "Applied", f"Pi 1 is already serving the “{configured_ssid}” access point.")
+
+
+def get_backup_status(last_backup: str) -> dict:
+    if not os.path.ismount("/backup"):
+        return build_status("error", "Missing", "Backup stick is not mounted at /backup.")
+    try:
+        if os.stat("/backup").st_dev == os.stat("/").st_dev:
+            return build_status("error", "Wrong disk", "Backup path points to the same device as the SD card.")
+    except Exception:
+        return build_status("error", "Unavailable", "Backup device health could not be verified.")
+    if not last_backup:
+        return build_status("warning", "Waiting", "Backup stick is ready, but no successful backup has been recorded yet.")
+    try:
+        last_backup_dt = datetime.fromisoformat(last_backup)
+    except Exception:
+        return build_status("warning", "Unknown", f"Backup timestamp “{last_backup}” could not be parsed.")
+    backup_age = datetime.now() - last_backup_dt
+    if backup_age > timedelta(hours=26):
+        return build_status("warning", "Stale", f"Last successful backup was {last_backup_dt.isoformat(timespec='minutes')}.")
+    return build_status("ok", "Healthy", f"Last successful backup finished {last_backup_dt.isoformat(timespec='minutes')}.")
+
+
+def get_disk_status(disk_data: dict) -> dict:
+    data_path = disk_data.get("path", "/data")
+    if not os.path.ismount(data_path):
+        return build_status("error", "Missing", f"Working storage is not mounted at {data_path}.")
+    percent = disk_data.get("percent", 0)
+    if percent >= 92:
+        return build_status("error", "Critical", f"Working stick is {percent:.1f}% full.")
+    if percent >= 85:
+        return build_status("warning", "Tight", f"Working stick is {percent:.1f}% full.")
+    return build_status("ok", "Healthy", f"Working stick has {disk_data.get('free_gb', 0):.1f} GB free.")
+
+
+def read_session_note(session_dir: str) -> str:
+    try:
+        with open(os.path.join(session_dir, SESSION_NOTE_FILE)) as f:
+            return f.read().strip()
+    except Exception:
+        return ""
+
+
+def sanitize_session_note(value: str) -> str:
+    note = " ".join((value or "").split())
+    note = "".join(ch for ch in note if ch.isprintable())
+    return note[:80]
+
+
+def get_archive_path(name: str):
+    candidate = os.path.abspath(os.path.join(ARCHIVE_DIR, os.path.basename(name or "")))
+    archive_root = os.path.abspath(ARCHIVE_DIR)
+    if os.path.commonpath([candidate, archive_root]) != archive_root or not os.path.isdir(candidate):
+        return None
+    return candidate
+
+
+def short_session_label(name: str) -> str:
+    return name[4:8] if len(name) >= 8 else name
+
+
+def estimate_frame_size(directory: str, sample_size: int = 24) -> int:
+    frames = heapq.nlargest(sample_size, glob.glob(os.path.join(directory, "frame_*.jpg")))
+    if not frames:
+        return 0
+    sizes = []
+    for frame in frames:
+        try:
+            sizes.append(os.path.getsize(frame))
+        except OSError:
+            continue
+    return int(sum(sizes) / len(sizes)) if sizes else 0
+
+
+def build_storage_projection(frames: int, archives: list, disk_data: dict, capture_interval_minutes: int) -> dict:
+    average_frame_bytes = estimate_frame_size(CURRENT_DIR)
+    remaining_frames = int(disk_data.get("free_bytes", 0) / average_frame_bytes) if average_frame_bytes else None
+    remaining_hours = round((remaining_frames * capture_interval_minutes) / 60.0, 1) if remaining_frames is not None else None
+    remaining_days = round(remaining_hours / 24.0, 1) if remaining_hours is not None else None
+    chart = []
+    recent_archives = list(reversed(archives[:5]))
+    for archive in recent_archives:
+        chart.append({
+            "label": short_session_label(archive["name"]),
+            "frames": archive["frames"],
+        })
+    chart.append({"label": "now", "frames": frames})
+    max_frames = max((point["frames"] for point in chart), default=0)
+    return {
+        "average_frame_mb": round(average_frame_bytes / 1e6, 2) if average_frame_bytes else 0,
+        "remaining_frames": remaining_frames,
+        "remaining_hours": remaining_hours,
+        "remaining_days": remaining_days,
+        "estimate_message": (
+            "Estimate uses recent JPG sizes from the current session and the free space on the working stick."
+            if average_frame_bytes
+            else "Storage estimate becomes available after a few frames have been captured."
+        ),
+        "chart": chart,
+        "chart_max_frames": max_frames,
+    }
+
+
 def list_archives() -> list:
     archives = []
     if os.path.isdir(ARCHIVE_DIR):
@@ -184,6 +351,7 @@ def list_archives() -> list:
                     "name": name,
                     "frames": count_frames(d),
                     "date": name,
+                    "note": read_session_note(d),
                 })
     return archives
 
@@ -230,20 +398,15 @@ def dashboard():
     archives = list_archives()
     disk_data = get_disk_usage("/data")
     disk_backup = get_disk_usage("/backup")
-
-    # Check warning flags
-    backup_warning = os.path.isfile(BACKUP_WARNING)
-    disk_warning = os.path.isfile(DISK_WARNING)
-
-    # Check if last backup > 26 hours
-    backup_stale = False
-    if last_bak:
-        try:
-            bak_dt = datetime.fromisoformat(last_bak)
-            if datetime.now() - bak_dt > timedelta(hours=26):
-                backup_stale = True
-        except Exception:
-            pass
+    backup_status = get_backup_status(last_bak)
+    disk_status = get_disk_status(disk_data)
+    wifi_status = get_pi1_wifi_status(cfg)
+    storage_projection = build_storage_projection(
+        frames,
+        archives,
+        disk_data,
+        cfg["capture_interval_minutes"],
+    )
 
     fps_options = [6, 12, 18, 25, 30, 48, 60, 120]
     # Compute durations for each FPS option
@@ -267,9 +430,11 @@ def dashboard():
         disk_backup=disk_backup,
         uptime=get_uptime(),
         cpu_temp=get_cpu_temp(),
-        backup_warning=backup_warning,
-        backup_stale=backup_stale,
-        disk_warning=disk_warning,
+        backup_status=backup_status,
+        disk_status=disk_status,
+        wifi_status=wifi_status,
+        storage_projection=storage_projection,
+        next_session_preview=next_session_id(),
         fps_options=fps_options,
         fps_durations=fps_durations,
     )
@@ -397,6 +562,31 @@ def new_session():
     return redirect(url_for("dashboard"))
 
 
+@app.route("/api/archive_note", methods=["POST"])
+@login_required
+def archive_note():
+    archive_name = request.form.get("archive_name", "")
+    archive_dir = get_archive_path(archive_name)
+    if not archive_dir:
+        flash("Archive not found.", "error")
+        return redirect(url_for("dashboard"))
+    note = sanitize_session_note(request.form.get("note", ""))
+    note_path = os.path.join(archive_dir, SESSION_NOTE_FILE)
+    if note:
+        tmp = note_path + ".tmp"
+        with open(tmp, "w") as f:
+            f.write(note)
+        os.rename(tmp, note_path)
+        flash(f"Saved label for {archive_name}.", "success")
+    else:
+        try:
+            os.remove(note_path)
+        except FileNotFoundError:
+            pass
+        flash(f"Cleared label for {archive_name}.", "success")
+    return redirect(url_for("dashboard"))
+
+
 @app.route("/api/thumbnail")
 @login_required
 def thumbnail():
@@ -473,12 +663,12 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
-background:#0d1117;color:#c9d1d9;padding:1rem;max-width:960px;margin:0 auto}
+background:#0d1117;color:#c9d1d9;padding:1rem;max-width:960px;margin:0 auto;line-height:1.45}
 h1{color:#58a6ff;margin-bottom:.5rem;font-size:1.5rem}
 h2{color:#58a6ff;font-size:1.1rem;margin:1.5rem 0 .75rem;border-bottom:1px solid #30363d;padding-bottom:.3rem}
 .grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem}
 @media(max-width:640px){.grid{grid-template-columns:1fr}}
-.card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:1rem}
+.card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:1rem;box-shadow:0 8px 24px rgba(1,4,9,.18)}
 label{display:block;font-size:.85rem;color:#8b949e;margin-bottom:.3rem}
 select,input[type=range],input[type=number],input[type=text],input[type=password]{
 width:100%;padding:.4rem;background:#0d1117;border:1px solid #30363d;border-radius:4px;color:#c9d1d9;margin-bottom:.75rem}
@@ -514,6 +704,33 @@ font-size:.65rem;color:#fff;position:relative;transition:height .3s}
 .success-banner{background:#1f6feb;color:#fff;padding:.5rem 1rem;border-radius:6px;margin-bottom:1rem;font-weight:600}
 .helper{font-size:.8rem;color:#8b949e;margin-top:-.35rem;margin-bottom:.75rem;line-height:1.4}
 .stack{display:flex;flex-direction:column;gap:.75rem}
+.actions{display:flex;flex-wrap:wrap;gap:.5rem;align-items:center}
+.actions button,.actions .btn{margin:0}
+.table-wrap{overflow-x:auto}
+.archive-note-form{min-width:220px}
+.archive-note-row{display:flex;gap:.5rem;align-items:flex-start}
+.archive-note-row input{margin-bottom:0}
+.status-summary{display:flex;flex-wrap:wrap;gap:.5rem;margin:.75rem 0}
+.notice-card{background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:.85rem;margin-top:.85rem}
+.notice-title{font-size:.8rem;color:#8b949e;margin-bottom:.25rem;text-transform:uppercase;letter-spacing:.04em}
+.compact-list{display:grid;gap:.35rem;font-size:.9rem}
+.muted{color:#8b949e}
+.mobile-stack{display:flex;flex-wrap:wrap;gap:.75rem}
+.mobile-stack > *{flex:1 1 220px}
+@media(max-width:820px){
+  body{padding:.75rem}
+  .stat-row{gap:.75rem}
+  .stat-box{flex:1 1 120px}
+}
+@media(max-width:640px){
+  body{padding:.5rem}
+  h1{font-size:1.3rem}
+  h2{font-size:1rem}
+  button,.btn{width:100%;margin-right:0}
+  .actions{flex-direction:column;align-items:stretch}
+  .archive-note-row{flex-direction:column}
+  th,td{padding:.45rem}
+}
 </style></head>
 <body>
 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem">
@@ -529,12 +746,14 @@ font-size:.65rem;color:#fff;position:relative;transition:height .3s}
 {% endif %}
 {% endwith %}
 
-{% if backup_warning or backup_stale %}
-<div class="warning-banner">⚠️ Backup warning: {{ "Backup failed!" if backup_warning else "Last backup older than 26 hours." }}
-Last backup: {{ last_backup or "never" }}</div>
+{% if wifi_status.needs_attention %}
+<div class="{{ 'warning-banner' if wifi_status.level == 'warning' else 'error-banner' }}">📶 {{ wifi_status.message }}</div>
 {% endif %}
-{% if disk_warning %}
-<div class="error-banner">⚠️ Disk usage on Working stick is above 85%!</div>
+{% if backup_status.needs_attention %}
+<div class="{{ 'warning-banner' if backup_status.level == 'warning' else 'error-banner' }}">💾 {{ backup_status.message }}</div>
+{% endif %}
+{% if disk_status.needs_attention %}
+<div class="{{ 'warning-banner' if disk_status.level == 'warning' else 'error-banner' }}">🧮 {{ disk_status.message }}</div>
 {% endif %}
 
 <!-- ─── CAPTURE SETTINGS ─── -->
@@ -598,8 +817,16 @@ Last backup: {{ last_backup or "never" }}</div>
   </div>
   <div style="font-size:.85rem;color:#8b949e">Last capture: <span id="session-last-capture">{{ last_capture or "–" }}</span></div>
   <img src="/api/thumbnail" alt="Latest frame" class="thumb" id="latest-thumb" onerror="this.style.display='none'">
-  <div style="margin-top:1rem">
-    <button class="btn-danger" onclick="if(confirm('Archive current session ({{ frames }} frames) and start new? This moves all images to archive.')){document.getElementById('new-session-form').submit()}">
+  <div class="notice-card">
+    <div class="notice-title">New session preview</div>
+    <div class="compact-list">
+      <div><strong>{{ session_id }}</strong> will be archived with {{ frames }} frames.</div>
+      <div>At {{ cfg.playback_fps }} fps, that archive will play for {{ "%.1f"|format(frames / cfg.playback_fps) if cfg.playback_fps > 0 else 0 }}s.</div>
+      <div>The fresh capture session will begin as <strong>{{ next_session_preview }}</strong>.</div>
+    </div>
+  </div>
+  <div style="margin-top:1rem" class="actions">
+    <button class="btn-danger" type="button" onclick='confirmNewSession({{ frames|tojson }}, {{ session_id|tojson }}, {{ next_session_preview|tojson }})'>
       Start New Session</button>
     <form id="new-session-form" method="POST" action="/api/new_session" style="display:none"></form>
   </div>
@@ -609,15 +836,55 @@ Last backup: {{ last_backup or "never" }}</div>
 {% if archives %}
 <h2>📁 Archived Sessions</h2>
 <div class="card">
+<div class="table-wrap">
 <table>
-<thead><tr><th>Session</th><th>Frames</th><th>Duration @{{ cfg.playback_fps }}fps</th></tr></thead>
+<thead><tr><th>Session</th><th>Frames</th><th>Duration @{{ cfg.playback_fps }}fps</th><th>Note / Label</th></tr></thead>
 <tbody>
 {% for a in archives %}
 <tr><td>{{ a.name }}</td><td>{{ a.frames }}</td>
-<td>{{ "%.1f"|format(a.frames / cfg.playback_fps) if cfg.playback_fps > 0 else "–" }}s</td></tr>
+<td>{{ "%.1f"|format(a.frames / cfg.playback_fps) if cfg.playback_fps > 0 else "–" }}s</td>
+<td>
+  <form method="POST" action="/api/archive_note" class="archive-note-form">
+    <input type="hidden" name="archive_name" value="{{ a.name }}">
+    <div class="archive-note-row">
+      <input type="text" name="note" value="{{ a.note|e }}" maxlength="80" placeholder="Optional note or label">
+      <button type="submit">Save</button>
+    </div>
+  </form>
+</td></tr>
 {% endfor %}
-</tbody></table></div>
+</tbody></table></div></div>
 {% endif %}
+
+<h2>📈 Session Growth & Storage</h2>
+<div class="card">
+  <div class="mobile-stack">
+    <div>
+      <label>Recent frame counts</label>
+      <div class="bar-chart">
+        {% set max_growth = storage_projection.chart_max_frames if storage_projection.chart_max_frames > 0 else 1 %}
+        {% for point in storage_projection.chart %}
+        <div class="bar" style="height:{{ (point.frames / max_growth * 100) if max_growth > 0 else 0 }}%;flex:1">
+          <span>{{ point.frames }}</span>
+          {{ point.label }}
+        </div>
+        {% endfor %}
+      </div>
+      <div class="helper">Recent archived sessions plus the current “now” session.</div>
+    </div>
+    <div class="stack">
+      <div class="stat-row">
+        <div class="stat-box"><div class="stat">{{ storage_projection.average_frame_mb }}</div><div class="stat-label">Avg Frame MB</div></div>
+        <div class="stat-box"><div class="stat">{{ storage_projection.remaining_frames if storage_projection.remaining_frames is not none else "–" }}</div><div class="stat-label">Frames Remaining</div></div>
+      </div>
+      <div class="stat-row">
+        <div class="stat-box"><div class="stat">{{ storage_projection.remaining_hours if storage_projection.remaining_hours is not none else "–" }}</div><div class="stat-label">Hours Left</div></div>
+        <div class="stat-box"><div class="stat">{{ storage_projection.remaining_days if storage_projection.remaining_days is not none else "–" }}</div><div class="stat-label">Days Left</div></div>
+      </div>
+      <div class="helper">{{ storage_projection.estimate_message }}</div>
+    </div>
+  </div>
+</div>
 
 <!-- ─── PLAYBACK SETTINGS ─── -->
 <h2>▶️ Playback Settings</h2>
@@ -650,8 +917,13 @@ Last backup: {{ last_backup or "never" }}</div>
     {% endfor %}
   </div>
 
-  <button type="submit">Save Playback Settings</button>
-  <button type="button" onclick="setBrightness()" style="background:#1f6feb">Send Brightness to Pi 2</button>
+  <div class="actions">
+    <button type="submit">Save Playback Settings</button>
+    <button type="button" onclick="setBrightness(true)" style="background:#1f6feb">Brightness Test on Pi 2</button>
+    <button type="button" onclick="restartPlayback()" style="background:#8957e5">Restart Playback</button>
+    <button type="button" onclick="resyncNow()" style="background:#0969da">Resync Now</button>
+  </div>
+  <div class="helper">Remote actions run on Pi 2 over the local installation network.</div>
 </form>
 
 <!-- ─── ADMIN & NETWORK SETTINGS ─── -->
@@ -679,6 +951,18 @@ Last backup: {{ last_backup or "never" }}</div>
       <div class="helper" style="margin-top:1.6rem">Current access point: <strong>{{ cfg.wifi_ssid|e }}</strong> at <strong>192.168.50.1</strong>.</div>
     </div>
   </div>
+  <div class="notice-card">
+    <div class="status-summary">
+      <span class="badge {{ wifi_status.badge_class }}">WiFi {{ wifi_status.label }}</span>
+      <span class="badge {{ backup_status.badge_class }}">Backup {{ backup_status.label }}</span>
+      <span class="badge {{ disk_status.badge_class }}">Storage {{ disk_status.label }}</span>
+    </div>
+    <div class="compact-list muted">
+      <div>{{ wifi_status.message }}</div>
+      <div>{{ backup_status.message }}</div>
+      <div>{{ disk_status.message }}</div>
+    </div>
+  </div>
   <button type="submit">Save Admin / WiFi Settings</button>
 </form>
 
@@ -688,6 +972,10 @@ Last backup: {{ last_backup or "never" }}</div>
   <div class="stat-row">
     <div class="stat-box"><div class="stat" id="p1-uptime">{{ uptime }}</div><div class="stat-label">Uptime</div></div>
     <div class="stat-box"><div class="stat" id="p1-temp">{{ cpu_temp }}</div><div class="stat-label">CPU Temp</div></div>
+  </div>
+  <div class="status-summary">
+    <span class="badge {{ backup_status.badge_class }}">Backup {{ backup_status.label }}</span>
+    <span class="badge {{ disk_status.badge_class }}">Storage {{ disk_status.label }}</span>
   </div>
   <div class="stat-row">
     <div class="stat-box">
@@ -719,6 +1007,7 @@ Last backup: {{ last_backup or "never" }}</div>
       <div class="stat-box"><div class="stat" id="p2-disk">–</div><div class="stat-label">Disk Usage</div></div>
     </div>
     <div style="font-size:.85rem;color:#8b949e">Last sync: <span id="p2-sync">–</span></div>
+    <div style="font-size:.85rem;color:#8b949e">WiFi: <span id="p2-wifi">–</span></div>
   </div>
 </div>
 
@@ -732,6 +1021,11 @@ function toggleManual(){
   m.classList.toggle('show',document.getElementById('exposure-mode').value==='manual');
 }
 
+function confirmNewSession(frames,currentId,nextId){
+  var message='Archive session "'+currentId+'" ('+frames+' frames) and start a fresh session as "'+nextId+'"?';
+  if(confirm(message)){document.getElementById('new-session-form').submit()}
+}
+
 function refreshThumbnail(hasFrames){
   var thumb=document.getElementById('latest-thumb');
   if(!hasFrames){
@@ -742,12 +1036,41 @@ function refreshThumbnail(hasFrames){
   thumb.src='/api/thumbnail?ts='+Date.now();
 }
 
-function setBrightness(){
+function parsePi2Response(response){
+  return response.json().catch(()=>({})).then(data=>({ok:response.ok,data:data}));
+}
+
+function runPi2Action(path, successMessage){
+  return fetch('http://192.168.50.20:5000'+path,{method:'POST'})
+    .then(parsePi2Response)
+    .then(({ok,data})=>{
+      if(!ok || data.error){throw new Error(data.error||'Pi 2 action failed')}
+      if(successMessage){alert(successMessage)}
+      return data;
+    })
+    .catch(err=>{alert(err.message||'Failed to reach Pi 2');throw err;});
+}
+
+function setBrightness(showSuccess){
   var v=document.querySelector('[name=display_brightness]').value;
   fetch('http://192.168.50.20:5000/display/brightness',{
     method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({value:parseInt(v)})
-  }).then(r=>{if(!r.ok)throw r}).catch(e=>alert('Failed to reach Pi 2'));
+  })
+    .then(parsePi2Response)
+    .then(({ok,data})=>{
+      if(!ok || data.error){throw new Error(data.error||'Brightness update failed')}
+      if(showSuccess){alert('Pi 2 brightness test sent.')}
+    })
+    .catch(err=>alert(err.message||'Failed to reach Pi 2'));
+}
+
+function restartPlayback(){
+  runPi2Action('/playback/reload','Pi 2 playback is restarting.');
+}
+
+function resyncNow(){
+  runPi2Action('/sync/now','Pi 2 sync service restarted for an immediate resync.');
 }
 
 // Poll Pi 2 status every 10 seconds
@@ -766,12 +1089,13 @@ function pollPi2(){
       document.getElementById('p2-temp').textContent=d.cpu_temp||'–';
       document.getElementById('p2-disk').textContent=(d.disk_used_gb||0)+'/'+(d.disk_total_gb||0)+' GB';
       document.getElementById('p2-sync').textContent=d.last_sync_timestamp||'–';
+      document.getElementById('p2-wifi').textContent=d.wifi_message||'–';
     })
     .catch(()=>{
       clearTimeout(tid);
       document.getElementById('pi2-offline').classList.remove('hidden');
       document.getElementById('pi2-online').classList.add('offline');
-      ['p2-frame','p2-state','p2-fps','p2-uptime','p2-temp','p2-disk','p2-sync'].forEach(id=>{
+      ['p2-frame','p2-state','p2-fps','p2-uptime','p2-temp','p2-disk','p2-sync','p2-wifi'].forEach(id=>{
         document.getElementById(id).textContent='–';
       });
     });
