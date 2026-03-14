@@ -21,7 +21,7 @@ from pathlib import Path
 
 from flask import (
     Flask, render_template_string, request, redirect,
-    url_for, session, jsonify, send_file, abort,
+    url_for, session, jsonify, send_file, abort, flash,
 )
 
 logging.basicConfig(
@@ -73,6 +73,36 @@ def write_config(cfg: dict):
     with open(tmp, "w") as f:
         json.dump(cfg, f, indent=2)
     os.rename(tmp, CONFIG_PATH)
+
+
+def clamp_int(value, default: int, minimum: int = None, maximum: int = None, allowed=None) -> int:
+    """Parse an int and constrain it to a safe range or set of values."""
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    if allowed is not None and parsed not in allowed:
+        return default
+    if minimum is not None:
+        parsed = max(minimum, parsed)
+    if maximum is not None:
+        parsed = min(maximum, parsed)
+    return parsed
+
+
+def allowed_value(value, default, allowed):
+    """Return a value only if it is explicitly allowed."""
+    return value if value in allowed else default
+
+
+def sanitize_ssid(value: str, default: str):
+    """Trim and validate an SSID without being overly restrictive."""
+    ssid = (value or "").strip()
+    if not ssid:
+        return default, "WiFi SSID cannot be blank, so the previous SSID was kept."
+    if len(ssid) > 32 or any(ord(ch) < 32 or ord(ch) == 127 for ch in ssid):
+        return default, "WiFi SSID must be 1-32 printable characters, so the previous SSID was kept."
+    return ssid, None
 
 
 # ── auth ─────────────────────────────────────────────────────────────────────
@@ -158,6 +188,17 @@ def list_archives() -> list:
     return archives
 
 
+def next_session_id() -> str:
+    """Generate a session ID that preserves the existing format unless needed."""
+    base_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    candidate = base_id
+    suffix = 1
+    while os.path.exists(os.path.join(ARCHIVE_DIR, candidate)):
+        candidate = f"{base_id}_{suffix}"
+        suffix += 1
+    return candidate
+
+
 # ── routes ───────────────────────────────────────────────────────────────────
 
 @app.route("/login", methods=["GET", "POST"])
@@ -238,41 +279,90 @@ def dashboard():
 @login_required
 def update_config():
     cfg = read_config()
+    old_cfg = dict(cfg)
     data = request.form
+    section = data.get("section", "settings")
+    messages = []
 
     # Capture settings
     if "capture_interval_minutes" in data:
-        cfg["capture_interval_minutes"] = int(data["capture_interval_minutes"])
+        cfg["capture_interval_minutes"] = clamp_int(
+            data["capture_interval_minutes"],
+            cfg["capture_interval_minutes"],
+            allowed={1, 5, 10, 15, 30},
+        )
     if "exposure_mode" in data:
-        cfg["exposure_mode"] = data["exposure_mode"]
+        cfg["exposure_mode"] = allowed_value(data["exposure_mode"], cfg["exposure_mode"], {"auto", "manual"})
     if "exposure_shutter_speed" in data:
-        cfg["exposure_shutter_speed"] = int(data["exposure_shutter_speed"])
+        cfg["exposure_shutter_speed"] = clamp_int(
+            data["exposure_shutter_speed"],
+            cfg["exposure_shutter_speed"],
+            minimum=100,
+            maximum=200000,
+        )
     if "exposure_iso" in data:
-        cfg["exposure_iso"] = int(data["exposure_iso"])
+        cfg["exposure_iso"] = clamp_int(
+            data["exposure_iso"],
+            cfg["exposure_iso"],
+            minimum=100,
+            maximum=3200,
+        )
     if "luma_enabled" in data:
         if data["luma_enabled"] == "on":
-            cfg["luma_target"] = int(data.get("luma_target", 128))
+            cfg["luma_target"] = clamp_int(
+                data.get("luma_target", 128),
+                cfg["luma_target"] if cfg.get("luma_target") is not None else 128,
+                minimum=0,
+                maximum=255,
+            )
         else:
             cfg["luma_target"] = None
-    elif "luma_target" in data:
-        # handle case where toggle is off
+    elif "luma_enabled" in data or "luma_target" in data:
         cfg["luma_target"] = None
 
     # Playback settings
     if "playback_fps" in data:
-        cfg["playback_fps"] = int(data["playback_fps"])
+        cfg["playback_fps"] = clamp_int(
+            data["playback_fps"],
+            cfg["playback_fps"],
+            allowed={6, 12, 18, 25, 30, 48, 60, 120},
+        )
     if "display_brightness" in data:
-        cfg["display_brightness"] = int(data["display_brightness"])
+        cfg["display_brightness"] = clamp_int(
+            data["display_brightness"],
+            cfg["display_brightness"],
+            minimum=0,
+            maximum=100,
+        )
 
     # Admin settings
     if "admin_password" in data and data["admin_password"]:
         cfg["admin_password"] = data["admin_password"]
-    if "wifi_ssid" in data and data["wifi_ssid"]:
-        cfg["wifi_ssid"] = data["wifi_ssid"]
+        if cfg["admin_password"] != old_cfg.get("admin_password"):
+            messages.append(("success", "Admin password updated."))
+    wifi_changed = False
+    if "wifi_ssid" in data:
+        wifi_ssid, ssid_error = sanitize_ssid(data["wifi_ssid"], old_cfg.get("wifi_ssid", cfg["wifi_ssid"]))
+        if ssid_error:
+            messages.append(("warning", ssid_error))
+        elif wifi_ssid != old_cfg.get("wifi_ssid"):
+            wifi_changed = True
+            cfg["wifi_ssid"] = wifi_ssid
     if "wifi_password" in data and data["wifi_password"]:
-        cfg["wifi_password"] = data["wifi_password"]
+        if len(data["wifi_password"]) < 8:
+            messages.append(("warning", "WiFi password must be at least 8 characters, so the previous password was kept."))
+        else:
+            if data["wifi_password"] != old_cfg.get("wifi_password"):
+                wifi_changed = True
+            cfg["wifi_password"] = data["wifi_password"]
+    if wifi_changed:
+        messages.append(("warning", "WiFi settings saved. Re-run Pi 1 setup and update Pi 2 so it can reconnect."))
 
     write_config(cfg)
+    if not messages:
+        messages.append(("success", f"{section.capitalize()} settings saved."))
+    for category, message in messages:
+        flash(message, category)
     return redirect(url_for("dashboard"))
 
 
@@ -294,7 +384,7 @@ def new_session():
 
     # Create fresh session
     os.makedirs(CURRENT_DIR, exist_ok=True)
-    new_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    new_id = next_session_id()
     tmp = os.path.join(CURRENT_DIR, "session.id.tmp")
     with open(tmp, "w") as f:
         f.write(new_id)
@@ -303,6 +393,7 @@ def new_session():
     # Restart capture service to pick up fresh session
     subprocess.run(["systemctl", "restart", "capture.service"], capture_output=True)
 
+    flash("Started a new session and archived the previous frames.", "success")
     return redirect(url_for("dashboard"))
 
 
@@ -420,12 +511,23 @@ font-size:.65rem;color:#fff;position:relative;transition:height .3s}
 #pi2-status .offline{opacity:.4}
 .warning-banner{background:#d29922;color:#000;padding:.5rem 1rem;border-radius:6px;margin-bottom:1rem;font-weight:600}
 .error-banner{background:#da3633;color:#fff;padding:.5rem 1rem;border-radius:6px;margin-bottom:1rem;font-weight:600}
+.success-banner{background:#1f6feb;color:#fff;padding:.5rem 1rem;border-radius:6px;margin-bottom:1rem;font-weight:600}
+.helper{font-size:.8rem;color:#8b949e;margin-top:-.35rem;margin-bottom:.75rem;line-height:1.4}
+.stack{display:flex;flex-direction:column;gap:.75rem}
 </style></head>
 <body>
 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem">
 <h1>🎬 Timelapse Dashboard</h1>
 <a href="/logout" class="btn" style="background:#484f58">Logout</a>
 </div>
+
+{% with flashes = get_flashed_messages(with_categories=true) %}
+{% if flashes %}
+  {% for category, message in flashes %}
+  <div class="{{ 'warning-banner' if category == 'warning' else 'success-banner' if category == 'success' else 'error-banner' }}">{{ message }}</div>
+  {% endfor %}
+{% endif %}
+{% endwith %}
 
 {% if backup_warning or backup_stale %}
 <div class="warning-banner">⚠️ Backup warning: {{ "Backup failed!" if backup_warning else "Last backup older than 26 hours." }}
@@ -438,6 +540,7 @@ Last backup: {{ last_backup or "never" }}</div>
 <!-- ─── CAPTURE SETTINGS ─── -->
 <h2>📷 Capture Settings</h2>
 <form method="POST" action="/api/config" class="card">
+  <input type="hidden" name="section" value="capture">
   <div class="grid">
     <div>
       <label>Capture Interval</label>
@@ -488,13 +591,13 @@ Last backup: {{ last_backup or "never" }}</div>
 <h2>🎞️ Current Session</h2>
 <div class="card">
   <div class="stat-row">
-    <div class="stat-box"><div class="stat">{{ frames }}</div><div class="stat-label">Frames</div></div>
+    <div class="stat-box"><div class="stat" id="session-frames">{{ frames }}</div><div class="stat-label">Frames</div></div>
     <div class="stat-box"><div class="stat">{{ cfg.playback_fps }} fps</div><div class="stat-label">Playback FPS</div></div>
-    <div class="stat-box"><div class="stat">{{ "%.1f"|format(frames / cfg.playback_fps) if cfg.playback_fps > 0 else 0 }}s</div><div class="stat-label">Video Duration</div></div>
-    <div class="stat-box"><div class="stat">{{ session_id }}</div><div class="stat-label">Session ID</div></div>
+    <div class="stat-box"><div class="stat" id="session-duration">{{ "%.1f"|format(frames / cfg.playback_fps) if cfg.playback_fps > 0 else 0 }}s</div><div class="stat-label">Video Duration</div></div>
+    <div class="stat-box"><div class="stat" id="session-id">{{ session_id }}</div><div class="stat-label">Session ID</div></div>
   </div>
-  <div style="font-size:.85rem;color:#8b949e">Last capture: {{ last_capture or "–" }}</div>
-  <img src="/api/thumbnail" alt="Latest frame" class="thumb" onerror="this.style.display='none'">
+  <div style="font-size:.85rem;color:#8b949e">Last capture: <span id="session-last-capture">{{ last_capture or "–" }}</span></div>
+  <img src="/api/thumbnail" alt="Latest frame" class="thumb" id="latest-thumb" onerror="this.style.display='none'">
   <div style="margin-top:1rem">
     <button class="btn-danger" onclick="if(confirm('Archive current session ({{ frames }} frames) and start new? This moves all images to archive.')){document.getElementById('new-session-form').submit()}">
       Start New Session</button>
@@ -519,6 +622,7 @@ Last backup: {{ last_backup or "never" }}</div>
 <!-- ─── PLAYBACK SETTINGS ─── -->
 <h2>▶️ Playback Settings</h2>
 <form method="POST" action="/api/config" class="card">
+  <input type="hidden" name="section" value="playback">
   <div class="grid">
     <div>
       <label>Playback FPS</label>
@@ -548,6 +652,34 @@ Last backup: {{ last_backup or "never" }}</div>
 
   <button type="submit">Save Playback Settings</button>
   <button type="button" onclick="setBrightness()" style="background:#1f6feb">Send Brightness to Pi 2</button>
+</form>
+
+<!-- ─── ADMIN & NETWORK SETTINGS ─── -->
+<h2>🔐 Admin & Network</h2>
+<form method="POST" action="/api/config" class="card">
+  <input type="hidden" name="section" value="network">
+  <div class="grid">
+    <div class="stack">
+      <div>
+        <label>Admin Password</label>
+        <input type="password" name="admin_password" autocomplete="new-password" placeholder="Leave blank to keep the current password">
+        <div class="helper">Only enter a value if you want to change the portal login.</div>
+      </div>
+      <div>
+        <label>WiFi SSID</label>
+        <input type="text" name="wifi_ssid" value="{{ cfg.wifi_ssid|e }}" maxlength="32" pattern=".*\S+.*" required>
+      </div>
+    </div>
+    <div class="stack">
+      <div>
+        <label>WiFi Password</label>
+        <input type="password" name="wifi_password" autocomplete="new-password" placeholder="Leave blank to keep the current WiFi password">
+        <div class="helper">If you change this, Pi 1 must be reconfigured and Pi 2 must be updated to reconnect.</div>
+      </div>
+      <div class="helper" style="margin-top:1.6rem">Current access point: <strong>{{ cfg.wifi_ssid|e }}</strong> at <strong>192.168.50.1</strong>.</div>
+    </div>
+  </div>
+  <button type="submit">Save Admin / WiFi Settings</button>
 </form>
 
 <!-- ─── SYSTEM STATUS ─── -->
@@ -600,6 +732,16 @@ function toggleManual(){
   m.classList.toggle('show',document.getElementById('exposure-mode').value==='manual');
 }
 
+function refreshThumbnail(hasFrames){
+  var thumb=document.getElementById('latest-thumb');
+  if(!hasFrames){
+    thumb.style.display='none';
+    return;
+  }
+  thumb.style.display='';
+  thumb.src='/api/thumbnail?ts='+Date.now();
+}
+
 function setBrightness(){
   var v=document.querySelector('[name=display_brightness]').value;
   fetch('http://192.168.50.20:5000/display/brightness',{
@@ -638,17 +780,24 @@ function pollPi2(){
 // Poll Pi 1 status every 30s
 function pollPi1(){
   fetch('/api/pi1_status').then(r=>r.json()).then(d=>{
+    var fps={{ cfg.playback_fps|int }};
     document.getElementById('p1-uptime').textContent=d.uptime;
     document.getElementById('p1-temp').textContent=d.cpu_temp;
     document.getElementById('p1-disk-data').textContent=d.disk_data.used_gb+'/'+d.disk_data.total_gb+' GB';
     document.getElementById('p1-disk-backup').textContent=d.disk_backup.used_gb+'/'+d.disk_backup.total_gb+' GB';
     document.getElementById('p1-backup').textContent=d.last_backup||'–';
+    document.getElementById('session-frames').textContent=d.frames;
+    document.getElementById('session-id').textContent=d.session_id||'–';
+    document.getElementById('session-last-capture').textContent=d.last_capture||'–';
+    document.getElementById('session-duration').textContent=(fps>0?((d.frames||0)/fps).toFixed(1):'0.0')+'s';
+    refreshThumbnail((d.frames||0)>0);
   }).catch(()=>{});
 }
 
 setInterval(pollPi2, 10000);
 setInterval(pollPi1, 30000);
 pollPi2();
+pollPi1();
 </script>
 </body></html>"""
 
