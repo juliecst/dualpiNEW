@@ -1,0 +1,6 @@
+# Append these lines to /etc/fstab on Pi 1
+# UUIDs are populated by setup.sh after formatting USB sticks
+# Working USB stick (exFAT) → /data
+UUID=__WORKING_UUID__  /data    exfat  defaults,nofail,uid=1000,gid=1000,dmask=0022,fmask=0133  0  0
+# Backup USB stick (exFAT) → /backup
+UUID=__BACKUP_UUID__   /backup  exfat  defaults,nofail,uid=1000,gid=1000,dmask=0022,fmask=0133  0  0

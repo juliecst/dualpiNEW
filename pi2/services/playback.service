@@ -1,0 +1,20 @@
+[Unit]
+Description=Timelapse Playback Service
+After=sync.service
+Wants=sync.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/playback.py
+WorkingDirectory=/data
+Restart=always
+RestartSec=10
+User=root
+StandardOutput=journal
+StandardError=journal
+Environment=PYTHONUNBUFFERED=1
+Environment=DISPLAY=:0
+Environment=XDG_RUNTIME_DIR=/run/user/0
+
+[Install]
+WantedBy=multi-user.target

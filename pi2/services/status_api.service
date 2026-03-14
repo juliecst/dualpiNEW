@@ -1,0 +1,18 @@
+[Unit]
+Description=Timelapse Status API (Flask)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/status_api.py
+WorkingDirectory=/data
+Restart=always
+RestartSec=10
+User=root
+StandardOutput=journal
+StandardError=journal
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

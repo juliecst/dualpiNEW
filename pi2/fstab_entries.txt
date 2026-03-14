@@ -1,0 +1,6 @@
+# Append these lines to /etc/fstab on Pi 2
+# Samba mount from Pi 1
+//192.168.50.1/timelapse  /mnt/timelapse  cifs  guest,_netdev,nofail,uid=1000,gid=1000,iocharset=utf8,vers=3.0  0  0
+# tmpfs mounts to reduce SD card wear
+tmpfs  /var/log  tmpfs  defaults,noatime,nosuid,nodev,size=50M  0  0
+tmpfs  /tmp      tmpfs  defaults,noatime,nosuid,nodev,size=100M 0  0

@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+###############################################################################
+# Pi 2 — Render Job (cron, twice daily at 06:00 and 18:00)
+# Renders archival .mp4 from /data/cache/ at the current FPS.
+# Keeps only the 3 most recent renders.
+###############################################################################
+set -euo pipefail
+
+LOG_TAG="timelapse-render"
+CACHE_DIR="/data/cache"
+RENDERS_DIR="/data/renders"
+CONFIG_LOCAL="/data/config_local.json"
+CONFIG_REMOTE="/mnt/timelapse/../config.json"
+
+log() { logger -t "$LOG_TAG" "$*"; echo "[$(date '+%F %T')] $*"; }
+
+# Read FPS from config
+FPS=25
+for cfg_path in "$CONFIG_REMOTE" "$CONFIG_LOCAL"; do
+    real_path=$(realpath "$cfg_path" 2>/dev/null) || continue
+    if [[ -f "$real_path" ]]; then
+        FPS=$(jq -r '.playback_fps // 25' "$real_path" 2>/dev/null) || FPS=25
+        break
+    fi
+done
+
+# Count frames
+FRAME_COUNT=$(find "$CACHE_DIR" -maxdepth 1 -name 'frame_*.jpg' 2>/dev/null | wc -l)
+if [[ "$FRAME_COUNT" -lt 2 ]]; then
+    log "Only $FRAME_COUNT frames — skipping render"
+    exit 0
+fi
+
+# Get session ID
+SESSION_ID="unknown"
+if [[ -f "$CACHE_DIR/session.id" ]]; then
+    SESSION_ID=$(cat "$CACHE_DIR/session.id")
+fi
+
+mkdir -p "$RENDERS_DIR"
+TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+OUTPUT="${RENDERS_DIR}/${SESSION_ID}_${TIMESTAMP}.mp4"
+TMP_OUTPUT="${OUTPUT}.tmp"
+
+log "Rendering $FRAME_COUNT frames at ${FPS}fps → $OUTPUT"
+
+ffmpeg -y \
+    -framerate "$FPS" \
+    -pattern_type glob \
+    -i "${CACHE_DIR}/frame_*.jpg" \
+    -vf "deflicker=mode=pm:size=10" \
+    -c:v libx264 \
+    -preset medium \
+    -crf 20 \
+    -pix_fmt yuv420p \
+    -movflags +faststart \
+    "$TMP_OUTPUT" 2>&1 | tail -5
+
+if [[ -f "$TMP_OUTPUT" ]]; then
+    mv "$TMP_OUTPUT" "$OUTPUT"
+    log "Render complete: $OUTPUT"
+else
+    log "ERROR: Render failed!"
+    exit 1
+fi
+
+# Keep only 3 most recent renders (exclude current_preview.mp4)
+cd "$RENDERS_DIR"
+ls -t *.mp4 2>/dev/null | grep -v "current_preview" | tail -n +4 | while read -r old; do
+    log "Removing old render: $old"
+    rm -f "$old"
+done
+
+log "Render job finished"
