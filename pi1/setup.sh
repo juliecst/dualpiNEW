@@ -126,6 +126,8 @@ if [[ ! -f /data/config.json ]]; then
   "admin_password": "changeme",
   "wifi_ssid": "timelapse-ap",
   "wifi_password": "changeme2",
+  "uplink_wifi_ssid": "",
+  "uplink_wifi_password": "",
   "display_type": "hdmi"
 }
 CONF
@@ -172,10 +174,12 @@ systemctl disable --now wpa_supplicant 2>/dev/null || true
 if ! grep -q "interface wlan0" /etc/dhcpcd.conf 2>/dev/null; then
     cat >> /etc/dhcpcd.conf <<'EOF'
 
+# BEGIN TIMELAPSE AP
 # Timelapse AP — static IP for wlan0
 interface wlan0
     static ip_address=192.168.50.1/24
     nohook wpa_supplicant
+# END TIMELAPSE AP
 EOF
 fi
 

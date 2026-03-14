@@ -118,10 +118,11 @@ Open **http://192.168.50.1** in any browser while connected to the `timelapse-ap
 Default admin password: `changeme`
 
 The dashboard provides:
-- **Capture settings:** interval, exposure mode, luma correction
+- **Capture settings:** numeric interval, exposure mode, and luma correction
 - **Session management:** preview before archiving, archived-session labels, and start new session
 - **Playback settings:** FPS selector, brightness test, restart playback, resync now, duration calculator, and an optional FFmpeg video-backup toggle
-- **Admin & network settings:** update the portal password and WiFi SSID/password with apply-status hints
+- **Admin & network settings:** update the portal password, see the current Pi 1 access IPs, change the AP SSID/password, and toggle Pi 1 between AP mode and an upstream WiFi client
+- **Setup & maintenance:** capture a live camera preview, verify libcamera availability, and format/mount the two USB sticks later from the dashboard if setup started without them
 - **System status:** uptime, CPU temp, disk usage, and WiFi health for both Pis
 - **Backup monitoring:** live backup/disk health checks, frame growth chart, and storage estimates
 
@@ -282,7 +283,7 @@ All settings live in `/data/config.json` on Pi 1. The admin portal reads and wri
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `capture_interval_minutes` | int | `5` | Minutes between captures (1/5/10/15/30) |
+| `capture_interval_minutes` | int | `5` | Minutes between captures (any whole number from 1 to 1440) |
 | `exposure_mode` | string | `"auto"` | `"auto"` or `"manual"` |
 | `exposure_shutter_speed` | int | `10000` | Shutter speed in µs (manual mode) |
 | `exposure_iso` | int | `100` | ISO sensitivity (manual mode) |
@@ -293,6 +294,8 @@ All settings live in `/data/config.json` on Pi 1. The admin portal reads and wri
 | `admin_password` | string | `"changeme"` | Admin portal password |
 | `wifi_ssid` | string | `"timelapse-ap"` | WiFi AP SSID |
 | `wifi_password` | string | `"changeme2"` | WiFi AP WPA2 password |
+| `uplink_wifi_ssid` | string | `""` | Optional upstream WiFi SSID used when toggling Pi 1 out of AP mode for updates |
+| `uplink_wifi_password` | string | `""` | Optional upstream WiFi password used with `uplink_wifi_ssid` |
 | `display_type` | string | `"hdmi"` | `"hdmi"` or `"spi"` for Waveshare display |
 
 ---

@@ -11,11 +11,14 @@ import json
 import os
 import glob
 import heapq
+import urllib.error
+import urllib.request
 import shutil
 import subprocess
 import time
 import functools
 import logging
+import re
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -43,6 +46,28 @@ LAST_BACKUP = "/data/last_backup.txt"
 BACKUP_WARNING = "/data/backup_warning.flag"
 DISK_WARNING = "/data/disk_warning.flag"
 HOSTAPD_CONF = "/etc/hostapd/hostapd.conf"
+DNSMASQ_LEASES = "/var/lib/misc/dnsmasq.leases"
+CAMERA_PREVIEW_PATH = "/data/camera_preview.jpg"
+WPA_SUPPLICANT_CONF = "/etc/wpa_supplicant/wpa_supplicant.conf"
+NETWORKMANAGER_IGNORE_WLAN0 = "/etc/NetworkManager/conf.d/10-ignore-wlan0.conf"
+DHCPCD_CONF = "/etc/dhcpcd.conf"
+PI2_API_PORT = 5000
+PI2_DEFAULT_IP = "192.168.50.20"
+# libcamera-still expects --timeout in milliseconds.
+CAMERA_PREVIEW_TIMEOUT_MS = "1500"
+# fdisk commands: new DOS table, new primary partition 1, type 7 (exFAT/HPFS), write.
+USB_FDISK_SCRIPT = "o\nn\np\n1\n\n\nt\n7\nw\n"
+AP_DHCPCD_BLOCK = """# BEGIN TIMELAPSE AP
+# Timelapse AP — static IP for wlan0
+interface wlan0
+    static ip_address=192.168.50.1/24
+    nohook wpa_supplicant
+# END TIMELAPSE AP
+"""
+AP_DHCPCD_BLOCK_PATTERNS = [
+    r"\n?# BEGIN TIMELAPSE AP\n# Timelapse AP — static IP for wlan0\ninterface wlan0\n\s*static ip_address=192\.168\.50\.1/24\n\s*nohook wpa_supplicant\n# END TIMELAPSE AP\n?",
+    r"\n?# Timelapse AP — static IP for wlan0\ninterface wlan0\n\s*static ip_address=192\.168\.50\.1/24\n\s*nohook wpa_supplicant\n?",
+]
 SESSION_NOTE_FILE = "session_note.txt"
 
 # ── config helpers ───────────────────────────────────────────────────────────
@@ -60,6 +85,8 @@ def read_config() -> dict:
         "admin_password": "changeme",
         "wifi_ssid": "timelapse-ap",
         "wifi_password": "changeme2",
+        "uplink_wifi_ssid": "",
+        "uplink_wifi_password": "",
         "display_type": "hdmi",
     }
     try:
@@ -107,6 +134,407 @@ def sanitize_ssid(value: str, default: str):
     if len(ssid) > 32 or any(ord(ch) < 32 or ord(ch) == 127 for ch in ssid):
         return default, "WiFi SSID must be 1-32 printable characters, so the previous SSID was kept."
     return ssid, None
+
+
+def run_command(cmd, timeout: int = 15, check: bool = False, input_text: str = None):
+    return subprocess.run(
+        cmd,
+        input=input_text,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=check,
+    )
+
+
+def read_text(path: str) -> str:
+    try:
+        with open(path) as f:
+            return f.read()
+    except Exception:
+        return ""
+
+
+def write_text(path: str, value: str):
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        f.write(value)
+    os.replace(tmp, path)
+
+
+def get_interface_addresses(interface: str) -> dict:
+    addresses = {"ipv4": [], "ipv6": []}
+    for family, key in (("-4", "ipv4"), ("-6", "ipv6")):
+        try:
+            result = run_command(["ip", "-o", family, "addr", "show", "dev", interface], timeout=5)
+        except Exception:
+            continue
+        if result.returncode != 0:
+            continue
+        for line in result.stdout.splitlines():
+            parts = line.split()
+            token = "inet6" if family == "-6" else "inet"
+            if token not in parts:
+                continue
+            address = parts[parts.index(token) + 1].split("/", 1)[0]
+            if family == "-6" and address.startswith("fe80:"):
+                continue
+            addresses[key].append(address)
+    return addresses
+
+
+def get_current_wifi_ssid() -> str:
+    try:
+        result = run_command(["iwgetid", "-r"], timeout=5)
+        return result.stdout.strip() if result.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
+def is_service_active(name: str) -> bool:
+    try:
+        result = run_command(["systemctl", "is-active", name], timeout=5)
+        return result.returncode == 0 and result.stdout.strip() == "active"
+    except Exception:
+        return False
+
+
+def get_pi1_network_mode() -> str:
+    if is_service_active("hostapd"):
+        return "ap"
+    if get_current_wifi_ssid():
+        return "wifi-client"
+    return "unknown"
+
+
+def get_access_addresses(current_host: str) -> list:
+    seen = set()
+    values = []
+    for address in [current_host] + get_interface_addresses("wlan0")["ipv4"] + get_interface_addresses("eth0")["ipv4"]:
+        address = (address or "").strip()
+        if not address or address in seen:
+            continue
+        seen.add(address)
+        values.append(address)
+    return values
+
+
+def get_pi1_network_summary(cfg: dict, current_host: str) -> dict:
+    wlan0 = get_interface_addresses("wlan0")
+    mode = get_pi1_network_mode()
+    uplink_ssid = get_current_wifi_ssid()
+    mode_label = {
+        "ap": "AP Mode",
+        "wifi-client": "Wi-Fi Client",
+        "unknown": "Unknown",
+    }.get(mode, "Unknown")
+    message = f"Pi 1 is currently running in {mode_label.lower()}."
+    if mode == "ap":
+        ap_name = cfg.get("wifi_ssid", "timelapse-ap")
+        if wlan0["ipv4"]:
+            message = f'Pi 1 is serving the "{ap_name}" access point on {", ".join(wlan0["ipv4"])}.'
+        else:
+            message = f'Pi 1 should be serving the "{ap_name}" access point, but wlan0 does not currently show an IPv4 address.'
+    elif mode == "wifi-client" and uplink_ssid:
+        if wlan0["ipv4"]:
+            message = f'Pi 1 is joined to Wi-Fi network "{uplink_ssid}" on {", ".join(wlan0["ipv4"])}.'
+        else:
+            message = f'Pi 1 is trying to join Wi-Fi network "{uplink_ssid}", but wlan0 does not currently show an IPv4 address.'
+    return {
+        "mode": mode,
+        "mode_label": mode_label,
+        "wlan0_ipv4": wlan0["ipv4"],
+        "wlan0_ipv6": wlan0["ipv6"],
+        "eth0_ipv4": get_interface_addresses("eth0")["ipv4"],
+        "current_host": current_host,
+        "access_hosts": get_access_addresses(current_host),
+        "message": message,
+        "uplink_ssid": uplink_ssid,
+    }
+
+
+def get_pi2_api_candidates() -> list:
+    candidates = []
+    seen = set()
+
+    def add_candidate(host: str):
+        host = (host or "").strip()
+        if not host or host in seen:
+            return
+        seen.add(host)
+        candidates.append(host)
+
+    pi1_wlan = get_interface_addresses("wlan0")["ipv4"]
+    if pi1_wlan:
+        parts = pi1_wlan[0].split(".")
+        if len(parts) == 4:
+            add_candidate(".".join(parts[:3] + ["20"]))
+    try:
+        with open(DNSMASQ_LEASES) as f:
+            for line in f:
+                lease = line.split()
+                if len(lease) >= 3:
+                    add_candidate(lease[2])
+    except Exception:
+        pass
+    try:
+        result = run_command(["ip", "neigh", "show", "dev", "wlan0"], timeout=5)
+        if result.returncode == 0:
+            for line in result.stdout.splitlines():
+                parts = line.split()
+                if parts:
+                    add_candidate(parts[0])
+    except Exception:
+        pass
+    add_candidate(PI2_DEFAULT_IP)
+    return candidates
+
+
+def proxy_pi2_request(path: str, method: str = "GET", payload: dict = None):
+    body = json.dumps(payload).encode() if payload is not None else None
+    headers = {"Content-Type": "application/json"} if payload is not None else {}
+    last_error = "Pi 2 is unreachable."
+    for host in get_pi2_api_candidates():
+        url = f"http://{host}:{PI2_API_PORT}{path}"
+        try:
+            request_obj = urllib.request.Request(url, data=body, headers=headers, method=method)
+            with urllib.request.urlopen(request_obj, timeout=4) as response:
+                raw = response.read().decode() or "{}"
+                data = json.loads(raw)
+                if isinstance(data, dict):
+                    data.setdefault("pi2_host", host)
+                return data, response.status
+        except urllib.error.HTTPError as exc:
+            last_error = exc.read().decode() or str(exc)
+        except Exception as exc:
+            last_error = str(exc)
+    return {"error": last_error}, 502
+
+
+def get_libcamera_status() -> dict:
+    binary = shutil.which("libcamera-still")
+    if not binary:
+        return build_status(
+            "error",
+            "Missing",
+            "libcamera-still is not installed on Pi 1. Pi 1 setup installs it in step 1 before the AP is created.",
+        )
+    preview_exists = os.path.isfile(CAMERA_PREVIEW_PATH)
+    message = "libcamera-still is installed on Pi 1 and ready for a live preview capture."
+    if preview_exists:
+        message = "libcamera-still is installed. The most recent preview image is shown below."
+    status = build_status("ok", "Ready", message)
+    status["preview_available"] = preview_exists
+    status["preview_timestamp"] = int(os.path.getmtime(CAMERA_PREVIEW_PATH)) if preview_exists else 0
+    return status
+
+
+def capture_camera_preview():
+    binary = shutil.which("libcamera-still")
+    if not binary:
+        raise RuntimeError("libcamera-still is not installed on Pi 1 yet.")
+    tmp_path = CAMERA_PREVIEW_PATH + ".tmp"
+    cmd = [
+        binary,
+        "--nopreview",
+        "--timeout", CAMERA_PREVIEW_TIMEOUT_MS,
+        "--width", "1280",
+        "--height", "720",
+        "--immediate",
+        "-o", tmp_path,
+    ]
+    result = run_command(cmd, timeout=20)
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or "libcamera-still preview failed")
+    os.replace(tmp_path, CAMERA_PREVIEW_PATH)
+
+
+def update_hostapd_credentials(cfg: dict):
+    content = read_text(HOSTAPD_CONF)
+    if not content:
+        return
+    ssid = cfg.get("wifi_ssid", "timelapse-ap")
+    password = cfg.get("wifi_password", "changeme2")
+    content = re.sub(r"^ssid=.*$", f"ssid={ssid}", content, flags=re.MULTILINE)
+    content = re.sub(r"^wpa_passphrase=.*$", f"wpa_passphrase={password}", content, flags=re.MULTILINE)
+    write_text(HOSTAPD_CONF, content)
+
+
+def set_ap_dhcpcd_enabled(enabled: bool):
+    content = read_text(DHCPCD_CONF)
+    for pattern in AP_DHCPCD_BLOCK_PATTERNS:
+        content = re.sub(pattern, "\n", content, flags=re.MULTILINE)
+    if enabled:
+        content = content.rstrip() + "\n\n" + AP_DHCPCD_BLOCK
+    write_text(DHCPCD_CONF, content.strip() + "\n")
+
+
+def ensure_networkmanager_ignore_wlan0(ignore: bool):
+    os.makedirs(os.path.dirname(NETWORKMANAGER_IGNORE_WLAN0), exist_ok=True)
+    if ignore:
+        write_text(NETWORKMANAGER_IGNORE_WLAN0, "[keyfile]\nunmanaged-devices=interface-name:wlan0\n")
+    else:
+        try:
+            os.remove(NETWORKMANAGER_IGNORE_WLAN0)
+        except FileNotFoundError:
+            pass
+
+
+def write_uplink_wifi_config(cfg: dict):
+    uplink_ssid = (cfg.get("uplink_wifi_ssid") or "").strip()
+    uplink_password = cfg.get("uplink_wifi_password") or ""
+    if not uplink_ssid:
+        raise ValueError("Save the upstream Wi-Fi SSID before switching Pi 1 out of AP mode.")
+    if len(uplink_password) < 8:
+        raise ValueError("The upstream Wi-Fi password must be at least 8 characters long.")
+    os.makedirs(os.path.dirname(WPA_SUPPLICANT_CONF), exist_ok=True)
+    write_text(
+        WPA_SUPPLICANT_CONF,
+        "\n".join(
+            [
+                "ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev",
+                "update_config=1",
+                "country=US",
+                "",
+                "network={",
+                f'    ssid="{uplink_ssid}"',
+                f'    psk="{uplink_password}"',
+                "    key_mgmt=WPA-PSK",
+                "    priority=1",
+                "}",
+                "",
+            ]
+        ),
+    )
+    if shutil.which("nmcli"):
+        run_command(["nmcli", "con", "delete", "timelapse-uplink"], timeout=10)
+        run_command(
+            [
+                "nmcli",
+                "con",
+                "add",
+                "con-name",
+                "timelapse-uplink",
+                "type",
+                "wifi",
+                "ifname",
+                "wlan0",
+                "ssid",
+                uplink_ssid,
+                "wifi-sec.key-mgmt",
+                "wpa-psk",
+                "wifi-sec.psk",
+                uplink_password,
+                "ipv4.method",
+                "auto",
+                "connection.autoconnect",
+                "yes",
+            ],
+            timeout=15,
+        )
+
+
+def switch_pi1_network_mode(mode: str, cfg: dict):
+    if mode not in {"ap", "wifi-client"}:
+        raise ValueError("Unsupported Pi 1 network mode requested.")
+    if mode == "wifi-client":
+        write_uplink_wifi_config(cfg)
+        set_ap_dhcpcd_enabled(False)
+        ensure_networkmanager_ignore_wlan0(False)
+        run_command(["systemctl", "stop", "hostapd", "dnsmasq"], timeout=15)
+        run_command(["systemctl", "enable", "--now", "wpa_supplicant"], timeout=15)
+        if shutil.which("nmcli"):
+            run_command(["systemctl", "restart", "NetworkManager"], timeout=20)
+            run_command(["nmcli", "con", "up", "timelapse-uplink"], timeout=20)
+        run_command(["systemctl", "restart", "dhcpcd"], timeout=20)
+    else:
+        update_hostapd_credentials(cfg)
+        set_ap_dhcpcd_enabled(True)
+        ensure_networkmanager_ignore_wlan0(True)
+        run_command(["systemctl", "disable", "--now", "wpa_supplicant"], timeout=15)
+        if shutil.which("nmcli"):
+            run_command(["systemctl", "restart", "NetworkManager"], timeout=20)
+        run_command(["systemctl", "restart", "dhcpcd"], timeout=20)
+        run_command(["systemctl", "restart", "hostapd", "dnsmasq"], timeout=20)
+    time.sleep(2)
+
+
+def create_timelapse_directories():
+    os.makedirs("/data/timelapse/current", exist_ok=True)
+    os.makedirs("/data/timelapse/archive", exist_ok=True)
+    os.makedirs("/data/renders", exist_ok=True)
+    os.makedirs("/backup/timelapse/current", exist_ok=True)
+    os.makedirs("/backup/timelapse/archive", exist_ok=True)
+    run_command(["chown", "-R", "1000:1000", "/data", "/backup"], timeout=20)
+
+
+def list_usb_devices() -> list:
+    result = run_command(["lsblk", "-bdnpo", "NAME,TRAN,SIZE"], timeout=10)
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or "lsblk failed")
+    devices = []
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if len(parts) != 3 or parts[1] != "usb":
+            continue
+        try:
+            devices.append({"path": parts[0], "size": int(parts[2])})
+        except ValueError:
+            continue
+    return sorted(devices, key=lambda device: device["size"], reverse=True)
+
+
+def get_device_partition(dev: str) -> str:
+    result = run_command(["lsblk", "-lnpo", "NAME,TYPE", dev], timeout=10, check=True)
+    partitions = []
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[1] == "part":
+            partitions.append(parts[0])
+    if not partitions:
+        raise RuntimeError(f"Partitioning {dev} did not create a usable partition.")
+    return partitions[0]
+
+
+def update_fstab_mounts(working_uuid: str, backup_uuid: str):
+    current_lines = []
+    for line in read_text("/etc/fstab").splitlines():
+        if "/data " in line or "/backup " in line:
+            continue
+        current_lines.append(line)
+    current_lines.append(f"UUID={working_uuid}  /data    exfat  defaults,nofail,uid=1000,gid=1000,dmask=0022,fmask=0133  0  0")
+    current_lines.append(f"UUID={backup_uuid}   /backup  exfat  defaults,nofail,uid=1000,gid=1000,dmask=0022,fmask=0133  0  0")
+    write_text("/etc/fstab", "\n".join(line for line in current_lines if line.strip()) + "\n")
+
+
+def format_and_mount_usb_sticks():
+    if os.path.ismount("/data") and os.path.ismount("/backup"):
+        create_timelapse_directories()
+        return "USB sticks are already mounted at /data and /backup."
+    usb_devices = list_usb_devices()
+    if len(usb_devices) < 2:
+        raise RuntimeError("Two USB sticks are required before formatting storage from the dashboard.")
+    working_dev = usb_devices[0]["path"]
+    backup_dev = usb_devices[1]["path"]
+    for dev in [working_dev, backup_dev]:
+        run_command(["wipefs", "-a", dev], timeout=20, check=True)
+        fdisk_result = run_command(["fdisk", dev], timeout=20, input_text=USB_FDISK_SCRIPT)
+        if fdisk_result.returncode != 0:
+            raise RuntimeError(fdisk_result.stderr.strip() or f"fdisk failed while preparing {dev}.")
+        time.sleep(1)
+        partition = get_device_partition(dev)
+        run_command(["mkfs.exfat", "-n", "TIMELAPSE", partition], timeout=60, check=True)
+    time.sleep(1)
+    working_part = get_device_partition(working_dev)
+    backup_part = get_device_partition(backup_dev)
+    working_uuid = run_command(["blkid", "-s", "UUID", "-o", "value", working_part], timeout=10, check=True).stdout.strip()
+    backup_uuid = run_command(["blkid", "-s", "UUID", "-o", "value", backup_part], timeout=10, check=True).stdout.strip()
+    update_fstab_mounts(working_uuid, backup_uuid)
+    os.makedirs("/data", exist_ok=True)
+    os.makedirs("/backup", exist_ok=True)
+    run_command(["mount", "-a"], timeout=20, check=True)
+    create_timelapse_directories()
+    return f"USB setup complete. Working storage is {working_dev}; backup storage is {backup_dev}."
 
 
 # ── auth ─────────────────────────────────────────────────────────────────────
@@ -231,15 +659,15 @@ def get_pi1_wifi_status(cfg: dict) -> dict:
         return build_status(
             "warning",
             "Unavailable",
-            "Pi 1 setup still needs to be run once so the access-point settings can be applied.",
+            "Pi 1 hostapd access-point settings have not been written yet.",
         )
     if applied_ssid != configured_ssid or applied_password != configured_password:
         return build_status(
             "warning",
             "Pending",
-            f"Pi 1 setup still needs to be rerun to switch the AP from “{applied_ssid}” to “{configured_ssid}”.",
+            f'Pi 1 hostapd is still serving "{applied_ssid}", while the saved dashboard settings expect "{configured_ssid}".',
         )
-    return build_status("ok", "Applied", f"Pi 1 is already serving the “{configured_ssid}” access point.")
+    return build_status("ok", "Applied", f'Pi 1 is already serving the "{configured_ssid}" access point.')
 
 
 def get_backup_status(last_backup: str) -> dict:
@@ -255,7 +683,7 @@ def get_backup_status(last_backup: str) -> dict:
     try:
         last_backup_dt = datetime.fromisoformat(last_backup)
     except Exception:
-        return build_status("warning", "Unknown", f"Backup timestamp “{last_backup}” could not be parsed.")
+        return build_status("warning", "Unknown", f'Backup timestamp "{last_backup}" could not be parsed.')
     backup_age = datetime.now() - last_backup_dt
     if backup_age > timedelta(hours=26):
         return build_status("warning", "Stale", f"Last successful backup was {last_backup_dt.isoformat(timespec='minutes')}.")
@@ -402,6 +830,9 @@ def dashboard():
     backup_status = get_backup_status(last_bak)
     disk_status = get_disk_status(disk_data)
     wifi_status = get_pi1_wifi_status(cfg)
+    current_host = (request.host.split(":", 1)[0] or "").strip("[]")
+    network_info = get_pi1_network_summary(cfg, current_host)
+    camera_status = get_libcamera_status()
     storage_projection = build_storage_projection(
         frames,
         archives,
@@ -434,6 +865,8 @@ def dashboard():
         backup_status=backup_status,
         disk_status=disk_status,
         wifi_status=wifi_status,
+        network_info=network_info,
+        camera_status=camera_status,
         storage_projection=storage_projection,
         next_session_preview=next_session_id(),
         fps_options=fps_options,
@@ -455,7 +888,8 @@ def update_config():
         cfg["capture_interval_minutes"] = clamp_int(
             data["capture_interval_minutes"],
             cfg["capture_interval_minutes"],
-            allowed={1, 5, 10, 15, 30},
+            minimum=1,
+            maximum=1440,
         )
     if "exposure_mode" in data:
         cfg["exposure_mode"] = allowed_value(data["exposure_mode"], cfg["exposure_mode"], {"auto", "manual"})
@@ -527,8 +961,26 @@ def update_config():
             if data["wifi_password"] != old_cfg.get("wifi_password"):
                 wifi_changed = True
             cfg["wifi_password"] = data["wifi_password"]
+    if "uplink_wifi_ssid" in data:
+        uplink_ssid, uplink_error = sanitize_ssid(data["uplink_wifi_ssid"], old_cfg.get("uplink_wifi_ssid", ""))
+        if data["uplink_wifi_ssid"].strip() == "":
+            cfg["uplink_wifi_ssid"] = ""
+        elif uplink_error:
+            messages.append(("warning", uplink_error.replace("WiFi SSID", "Upstream WiFi SSID")))
+        else:
+            cfg["uplink_wifi_ssid"] = uplink_ssid
+    if "uplink_wifi_password" in data:
+        uplink_password = data["uplink_wifi_password"]
+        if uplink_password:
+            if len(uplink_password) < 8:
+                messages.append(("warning", "Upstream WiFi password must be at least 8 characters, so the previous value was kept."))
+            else:
+                cfg["uplink_wifi_password"] = uplink_password
     if wifi_changed:
-        messages.append(("warning", "WiFi settings saved. Re-run Pi 1 setup and update Pi 2 so it can reconnect."))
+        update_hostapd_credentials(cfg)
+        if get_pi1_network_mode() == "ap":
+            run_command(["systemctl", "restart", "hostapd"], timeout=15)
+        messages.append(("warning", "Access-point settings saved on Pi 1. Update Pi 2 too if it needs to reconnect with the new AP password."))
 
     write_config(cfg)
     if not messages:
@@ -536,6 +988,84 @@ def update_config():
     for category, message in messages:
         flash(message, category)
     return redirect(url_for("dashboard"))
+
+
+@app.route("/api/network_mode", methods=["POST"])
+@login_required
+def network_mode():
+    cfg = read_config()
+    mode = request.form.get("mode", "")
+    try:
+        switch_pi1_network_mode(mode, cfg)
+    except ValueError as exc:
+        flash(str(exc), "warning")
+    except Exception as exc:
+        flash(f"Could not switch Pi 1 network mode: {exc}", "error")
+    else:
+        label = "Wi-Fi client" if mode == "wifi-client" else "access point"
+        flash(f"Pi 1 switched to {label} mode.", "success")
+    return redirect(url_for("dashboard"))
+
+
+@app.route("/api/camera_preview", methods=["POST"])
+@login_required
+def camera_preview():
+    try:
+        capture_camera_preview()
+    except Exception as exc:
+        flash(f"Camera preview failed: {exc}", "error")
+    else:
+        flash("Captured a fresh camera preview on Pi 1.", "success")
+    return redirect(url_for("dashboard"))
+
+
+@app.route("/api/camera_preview_image")
+@login_required
+def camera_preview_image():
+    if not os.path.isfile(CAMERA_PREVIEW_PATH):
+        abort(404)
+    return send_file(CAMERA_PREVIEW_PATH, mimetype="image/jpeg")
+
+
+@app.route("/api/setup_usb", methods=["POST"])
+@login_required
+def setup_usb():
+    try:
+        message = format_and_mount_usb_sticks()
+    except Exception as exc:
+        flash(f"USB setup failed: {exc}", "error")
+    else:
+        flash(message, "success")
+    return redirect(url_for("dashboard"))
+
+
+@app.route("/api/pi2/status")
+@login_required
+def proxy_pi2_status():
+    data, status = proxy_pi2_request("/status")
+    return jsonify(data), status
+
+
+@app.route("/api/pi2/playback/reload", methods=["POST"])
+@login_required
+def proxy_pi2_reload():
+    data, status = proxy_pi2_request("/playback/reload", method="POST")
+    return jsonify(data), status
+
+
+@app.route("/api/pi2/sync/now", methods=["POST"])
+@login_required
+def proxy_pi2_sync():
+    data, status = proxy_pi2_request("/sync/now", method="POST")
+    return jsonify(data), status
+
+
+@app.route("/api/pi2/display/brightness", methods=["POST"])
+@login_required
+def proxy_pi2_brightness():
+    payload = request.get_json(force=True, silent=True) or {}
+    data, status = proxy_pi2_request("/display/brightness", method="POST", payload=payload)
+    return jsonify(data), status
 
 
 @app.route("/api/new_session", methods=["POST"])
@@ -769,12 +1299,9 @@ font-size:.65rem;color:#fff;position:relative;transition:height .3s}
   <input type="hidden" name="section" value="capture">
   <div class="grid">
     <div>
-      <label>Capture Interval</label>
-      <select name="capture_interval_minutes">
-        {% for v in [1,5,10,15,30] %}
-        <option value="{{v}}" {{'selected' if cfg.capture_interval_minutes==v}}>{{v}} min</option>
-        {% endfor %}
-      </select>
+      <label for="capture-interval">Capture Interval</label>
+      <input id="capture-interval" type="number" name="capture_interval_minutes" min="1" max="1440" step="1" value="{{ cfg.capture_interval_minutes }}" aria-describedby="capture-interval-help">
+      <div class="helper" id="capture-interval-help">Enter any whole number from 1 to 1440 minutes.</div>
     </div>
     <div>
       <label>Exposure Mode</label>
@@ -941,7 +1468,7 @@ font-size:.65rem;color:#fff;position:relative;transition:height .3s}
     <button type="button" onclick="restartPlayback()" style="background:#8957e5">Restart Playback</button>
     <button type="button" onclick="resyncNow()" style="background:#0969da">Resync Now</button>
   </div>
-  <div class="helper">Remote actions run on Pi 2 over the local installation network.</div>
+  <div class="helper">Remote actions run on Pi 2 through Pi 1, so they keep working even if Pi 2 is not using the default hard-coded address.</div>
 </form>
 
 <!-- ─── ADMIN & NETWORK SETTINGS ─── -->
@@ -964,25 +1491,94 @@ font-size:.65rem;color:#fff;position:relative;transition:height .3s}
       <div>
         <label>WiFi Password</label>
         <input type="password" name="wifi_password" autocomplete="new-password" placeholder="Leave blank to keep the current WiFi password">
-        <div class="helper">If you change this, Pi 1 must be reconfigured and Pi 2 must be updated to reconnect.</div>
+        <div class="helper">If you change this, Pi 2 must also be updated to reconnect to the AP.</div>
       </div>
-      <div class="helper" style="margin-top:1.6rem">Current access point: <strong>{{ cfg.wifi_ssid|e }}</strong> at <strong>192.168.50.1</strong>.</div>
+      <div>
+        <label>Upstream WiFi SSID</label>
+        <input type="text" name="uplink_wifi_ssid" value="{{ cfg.uplink_wifi_ssid|e }}" maxlength="32" placeholder="Optional internet WiFi for updates">
+      </div>
+      <div>
+        <label>Upstream WiFi Password</label>
+        <input type="password" name="uplink_wifi_password" autocomplete="new-password" placeholder="Leave blank to keep the current upstream password">
+        <div class="helper">Save these credentials before switching Pi 1 from AP mode back to a normal WiFi network for updates.</div>
+      </div>
     </div>
+  </div>
+  <div class="helper">
+    Dashboard access right now:
+    {% for host in network_info.access_hosts %}
+      <strong>http://{{ host }}</strong>{% if not loop.last %}, {% endif %}
+    {% endfor %}
+    {% if not network_info.access_hosts %}<strong>localhost</strong>{% endif %}
   </div>
   <div class="notice-card">
     <div class="status-summary">
       <span class="badge {{ wifi_status.badge_class }}">WiFi {{ wifi_status.label }}</span>
+      <span class="badge {{ 'badge-ok' if network_info.mode == 'ap' else 'badge-warn' if network_info.mode == 'wifi-client' else 'badge-off' }}">Pi 1 {{ network_info.mode_label }}</span>
       <span class="badge {{ backup_status.badge_class }}">Backup {{ backup_status.label }}</span>
       <span class="badge {{ disk_status.badge_class }}">Storage {{ disk_status.label }}</span>
     </div>
     <div class="compact-list muted">
       <div>{{ wifi_status.message }}</div>
+      <div>{{ network_info.message }}</div>
+      {% if network_info.wlan0_ipv6 %}
+      <div>Pi 1 IPv6 on wlan0: {{ network_info.wlan0_ipv6|join(', ') }}</div>
+      {% endif %}
       <div>{{ backup_status.message }}</div>
       <div>{{ disk_status.message }}</div>
     </div>
   </div>
-  <button type="submit">Save Admin / WiFi Settings</button>
+  <div class="actions" style="margin-top:.85rem">
+    <button type="submit">Save Admin / WiFi Settings</button>
+    <button type="button" onclick="switchPi1Mode('wifi-client')" style="background:#d29922;color:#000">Switch Pi 1 to WiFi Client</button>
+    <button type="button" onclick="switchPi1Mode('ap')" style="background:#1f6feb">Return Pi 1 to AP Mode</button>
+  </div>
 </form>
+
+<h2>🧰 Setup & Maintenance</h2>
+<div class="card">
+  <div class="grid">
+    <div class="stack">
+      <div class="notice-card">
+        <div class="notice-title">Camera preview</div>
+        <div class="status-summary">
+          <span class="badge {{ camera_status.badge_class }}">Camera {{ camera_status.label }}</span>
+        </div>
+        <div class="compact-list muted">
+          <div>{{ camera_status.message }}</div>
+          <div>Pi 1 setup installs camera dependencies first, while internet is still available, before the AP services are configured.</div>
+        </div>
+        <div class="actions" style="margin-top:.85rem">
+          <form method="POST" action="/api/camera_preview" style="width:100%">
+            <button type="submit">Capture Preview on Pi 1</button>
+          </form>
+        </div>
+        {% if camera_status.preview_available %}
+        <img src="/api/camera_preview_image?ts={{ camera_status.preview_timestamp }}" alt="Camera preview" class="thumb">
+        {% endif %}
+      </div>
+    </div>
+    <div class="stack">
+      <div class="notice-card">
+        <div class="notice-title">USB storage setup</div>
+        <div class="status-summary">
+          <span class="badge {{ disk_status.badge_class }}">Working USB {{ disk_status.label }}</span>
+          <span class="badge {{ backup_status.badge_class }}">Backup USB {{ backup_status.label }}</span>
+        </div>
+        <div class="compact-list muted">
+          <div>If setup started before both USB sticks were connected, you can finish the storage setup from here later.</div>
+          <div>This formats the two largest USB drives as exFAT and mounts them as <strong>/data</strong> and <strong>/backup</strong>.</div>
+        </div>
+        <div class="warning-banner" role="alert" style="margin-top:.85rem">Formatting USB storage erases both selected drives. Only run this after confirming the correct sticks are connected.</div>
+        <div class="actions" style="margin-top:.85rem">
+          <form method="POST" action="/api/setup_usb" onsubmit="return confirm('Format the two largest USB drives as /data and /backup? This erases them.');" style="width:100%">
+            <button type="submit" class="btn-danger">Format / Mount USB Sticks</button>
+          </form>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
 
 <!-- ─── SYSTEM STATUS ─── -->
 <h2>🖥️ System Status — Pi 1 (Camera)</h2>
@@ -1059,7 +1655,7 @@ function parsePi2Response(response){
 }
 
 function runPi2Action(path, successMessage){
-  return fetch('http://192.168.50.20:5000'+path,{method:'POST'})
+  return fetch(path,{method:'POST'})
     .then(parsePi2Response)
     .then(({ok,data})=>{
       if(!ok || data.error){throw new Error(data.error||'Pi 2 action failed')}
@@ -1071,7 +1667,7 @@ function runPi2Action(path, successMessage){
 
 function setBrightness(showSuccess){
   var v=document.querySelector('[name=display_brightness]').value;
-  fetch('http://192.168.50.20:5000/display/brightness',{
+  fetch('/api/pi2/display/brightness',{
     method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({value:parseInt(v)})
   })
@@ -1084,18 +1680,35 @@ function setBrightness(showSuccess){
 }
 
 function restartPlayback(){
-  runPi2Action('/playback/reload','Pi 2 playback is restarting.');
+  runPi2Action('/api/pi2/playback/reload','Pi 2 playback is restarting.');
 }
 
 function resyncNow(){
-  runPi2Action('/sync/now','Pi 2 sync service restarted for an immediate resync.');
+  runPi2Action('/api/pi2/sync/now','Pi 2 sync service restarted for an immediate resync.');
+}
+
+function switchPi1Mode(mode){
+  var message=mode==='wifi-client'
+    ? 'Switch Pi 1 out of AP mode and back onto the saved WiFi network? The dashboard may disappear until Pi 1 reconnects on its new address.'
+    : 'Return Pi 1 to access-point mode?';
+  if(!confirm(message)){return}
+  var form=document.createElement('form');
+  form.method='POST';
+  form.action='/api/network_mode';
+  var input=document.createElement('input');
+  input.type='hidden';
+  input.name='mode';
+  input.value=mode;
+  form.appendChild(input);
+  document.body.appendChild(form);
+  form.submit();
 }
 
 // Poll Pi 2 status every 10 seconds
 function pollPi2(){
   var ctrl=new AbortController();
   var tid=setTimeout(()=>ctrl.abort(),2000);
-  fetch('http://192.168.50.20:5000/status',{signal:ctrl.signal})
+  fetch('/api/pi2/status',{signal:ctrl.signal})
     .then(r=>{clearTimeout(tid);return r.json()})
     .then(d=>{
       document.getElementById('pi2-offline').classList.add('hidden');
@@ -1107,7 +1720,9 @@ function pollPi2(){
       document.getElementById('p2-temp').textContent=d.cpu_temp||'–';
       document.getElementById('p2-disk').textContent=(d.disk_used_gb||0)+'/'+(d.disk_total_gb||0)+' GB';
       document.getElementById('p2-sync').textContent=d.last_sync_timestamp||'–';
-      document.getElementById('p2-wifi').textContent=d.wifi_message||'–';
+      var pi2WifiText=d.wifi_message||'–';
+      if(d.pi2_host){pi2WifiText+=' via '+d.pi2_host}
+      document.getElementById('p2-wifi').textContent=pi2WifiText;
     })
     .catch(()=>{
       clearTimeout(tid);
