@@ -110,11 +110,11 @@ Default admin password: `changeme`
 
 The dashboard provides:
 - **Capture settings:** interval, exposure mode, luma correction
-- **Session management:** view current frames, start new session (archives current)
-- **Playback settings:** FPS selector, brightness, duration calculator
-- **Admin & network settings:** update the portal password and WiFi SSID/password
-- **System status:** uptime, CPU temp, disk usage for both Pis
-- **Backup monitoring:** last backup time, warning banners
+- **Session management:** preview before archiving, archived-session labels, and start new session
+- **Playback settings:** FPS selector, brightness test, restart playback, resync now, duration calculator
+- **Admin & network settings:** update the portal password and WiFi SSID/password with apply-status hints
+- **System status:** uptime, CPU temp, disk usage, and WiFi health for both Pis
+- **Backup monitoring:** live backup/disk health checks, frame growth chart, and storage estimates
 
 ---
 
