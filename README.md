@@ -84,6 +84,15 @@ touch /Volumes/bootfs/ssh
    ```
 5. Pi 2 will connect to Pi 1's AP, mount the Samba share, and start playback
 
+### Daily power-off / power-on behavior
+
+The installation is safe to switch off at night and power back on in the morning:
+
+- **Both Pis autostart automatically.** All capture, portal, sync, playback, WiFi retry, Samba, and NTP services are enabled through systemd during setup.
+- **Boot order does not need to be perfect.** Pi 2 keeps retrying the WiFi link and re-attempts the Samba mount until Pi 1 has finished bringing up its access point and file share.
+- **The handshake is session-based.** Pi 2 watches `session.id`; when it sees a new session it wipes its local cache and syncs the fresh frames, and when the session is unchanged it simply resumes syncing where it left off.
+- **Sudden power cuts are survivable.** The services use atomic temp-file renames for config, capture, sync, and backup markers, so incomplete writes are discarded on the next boot. Capture resumes from the last fully written frame number in the current session.
+
 ---
 
 ## SSH Access Via the AP Network
@@ -111,7 +120,7 @@ Default admin password: `changeme`
 The dashboard provides:
 - **Capture settings:** interval, exposure mode, luma correction
 - **Session management:** preview before archiving, archived-session labels, and start new session
-- **Playback settings:** FPS selector, brightness test, restart playback, resync now, duration calculator
+- **Playback settings:** FPS selector, brightness test, restart playback, resync now, duration calculator, and an optional FFmpeg video-backup toggle
 - **Admin & network settings:** update the portal password and WiFi SSID/password with apply-status hints
 - **System status:** uptime, CPU temp, disk usage, and WiFi health for both Pis
 - **Backup monitoring:** live backup/disk health checks, frame growth chart, and storage estimates
@@ -280,6 +289,7 @@ All settings live in `/data/config.json` on Pi 1. The admin portal reads and wri
 | `luma_target` | int\|null | `null` | Target avg luminance 0–255, or null to disable |
 | `playback_fps` | int | `25` | Playback frame rate |
 | `display_brightness` | int | `100` | Display brightness 0–100% |
+| `ffmpeg_video_backup_enabled` | bool | `true` | Enables Pi 2's optional twice-daily FFmpeg archival MP4 render job |
 | `admin_password` | string | `"changeme"` | Admin portal password |
 | `wifi_ssid` | string | `"timelapse-ap"` | WiFi AP SSID |
 | `wifi_password` | string | `"changeme2"` | WiFi AP WPA2 password |

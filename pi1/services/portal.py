@@ -56,6 +56,7 @@ def read_config() -> dict:
         "luma_target": None,
         "playback_fps": 25,
         "display_brightness": 100,
+        "ffmpeg_video_backup_enabled": True,
         "admin_password": "changeme",
         "wifi_ssid": "timelapse-ap",
         "wifi_password": "changeme2",
@@ -499,6 +500,12 @@ def update_config():
             minimum=0,
             maximum=100,
         )
+    if "ffmpeg_video_backup_present" in data:
+        video_backup_enabled = data.get("ffmpeg_video_backup_enabled") == "on"
+        cfg["ffmpeg_video_backup_enabled"] = video_backup_enabled
+        if video_backup_enabled != old_cfg.get("ffmpeg_video_backup_enabled", True):
+            state = "enabled" if video_backup_enabled else "disabled"
+            messages.append(("success", f"Optional FFmpeg video backups {state}."))
 
     # Admin settings
     if "admin_password" in data and data["admin_password"]:
@@ -890,6 +897,7 @@ font-size:.65rem;color:#fff;position:relative;transition:height .3s}
 <h2>▶️ Playback Settings</h2>
 <form method="POST" action="/api/config" class="card">
   <input type="hidden" name="section" value="playback">
+  <input type="hidden" name="ffmpeg_video_backup_present" value="1">
   <div class="grid">
     <div>
       <label>Playback FPS</label>
@@ -916,6 +924,16 @@ font-size:.65rem;color:#fff;position:relative;transition:height .3s}
     </div>
     {% endfor %}
   </div>
+
+  <label class="notice-card" style="display:flex;gap:.75rem;align-items:flex-start;margin-top:1rem">
+    <input type="checkbox" name="ffmpeg_video_backup_enabled" value="on" {{ 'checked' if cfg.ffmpeg_video_backup_enabled else '' }} style="margin-top:.25rem">
+    <span>
+      <strong>Keep Pi 2's optional FFmpeg video backup job enabled</strong>
+      <span class="helper" style="display:block;margin-top:.35rem">
+        This controls the twice-daily archival MP4 render on Pi 2. Turn it off if morning startup and live playback are more important than keeping optional video backups. Live playback still uses FFmpeg automatically when you choose a playback rate above 30 fps.
+      </span>
+    </span>
+  </label>
 
   <div class="actions">
     <button type="submit">Save Playback Settings</button>

@@ -122,6 +122,7 @@ if [[ ! -f /data/config.json ]]; then
   "luma_target": null,
   "playback_fps": 25,
   "display_brightness": 100,
+  "ffmpeg_video_backup_enabled": true,
   "admin_password": "changeme",
   "wifi_ssid": "timelapse-ap",
   "wifi_password": "changeme2",
