@@ -112,6 +112,7 @@ The dashboard provides:
 - **Capture settings:** interval, exposure mode, luma correction
 - **Session management:** view current frames, start new session (archives current)
 - **Playback settings:** FPS selector, brightness, duration calculator
+- **Admin & network settings:** update the portal password and WiFi SSID/password
 - **System status:** uptime, CPU temp, disk usage for both Pis
 - **Backup monitoring:** last backup time, warning banners
 
@@ -136,7 +137,7 @@ os.rename(tmp, '/data/config.json')
 ### WiFi Password
 > **Warning:** Changing the WiFi password requires updating both Pis.
 
-1. Update via admin portal or edit `/data/config.json` on Pi 1
+1. Update via the **Admin & Network** section in the admin portal, or edit `/data/config.json` on Pi 1
 2. Re-run Pi 1's setup to apply to hostapd:
    ```bash
    sudo bash ~/pi1/setup.sh
