@@ -90,6 +90,21 @@ def clamp_int(value, default: int, minimum: int = None, maximum: int = None, all
     return parsed
 
 
+def allowed_value(value, default, allowed):
+    """Return a value only if it is explicitly allowed."""
+    return value if value in allowed else default
+
+
+def sanitize_ssid(value: str, default: str):
+    """Trim and validate an SSID without being overly restrictive."""
+    ssid = (value or "").strip()
+    if not ssid:
+        return default, "WiFi SSID cannot be blank, so the previous SSID was kept."
+    if len(ssid) > 32 or any(ord(ch) < 32 or ord(ch) == 127 for ch in ssid):
+        return default, "WiFi SSID must be 1-32 printable characters, so the previous SSID was kept."
+    return ssid, None
+
+
 # ── auth ─────────────────────────────────────────────────────────────────────
 
 def login_required(f):
@@ -171,6 +186,17 @@ def list_archives() -> list:
                     "date": name,
                 })
     return archives
+
+
+def next_session_id() -> str:
+    """Generate a session ID that preserves the existing format unless needed."""
+    base_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    candidate = base_id
+    suffix = 1
+    while os.path.exists(os.path.join(ARCHIVE_DIR, candidate)):
+        candidate = f"{base_id}_{suffix}"
+        suffix += 1
+    return candidate
 
 
 # ── routes ───────────────────────────────────────────────────────────────────
@@ -266,7 +292,7 @@ def update_config():
             allowed={1, 5, 10, 15, 30},
         )
     if "exposure_mode" in data:
-        cfg["exposure_mode"] = data["exposure_mode"] if data["exposure_mode"] in {"auto", "manual"} else cfg["exposure_mode"]
+        cfg["exposure_mode"] = allowed_value(data["exposure_mode"], cfg["exposure_mode"], {"auto", "manual"})
     if "exposure_shutter_speed" in data:
         cfg["exposure_shutter_speed"] = clamp_int(
             data["exposure_shutter_speed"],
@@ -283,11 +309,15 @@ def update_config():
         )
     if "luma_enabled" in data:
         if data["luma_enabled"] == "on":
-            cfg["luma_target"] = clamp_int(data.get("luma_target", 128), 128, minimum=0, maximum=255)
+            cfg["luma_target"] = clamp_int(
+                data.get("luma_target", 128),
+                cfg["luma_target"] if cfg.get("luma_target") is not None else 128,
+                minimum=0,
+                maximum=255,
+            )
         else:
             cfg["luma_target"] = None
-    elif "luma_target" in data:
-        # handle case where toggle is off
+    elif "luma_enabled" in data or "luma_target" in data:
         cfg["luma_target"] = None
 
     # Playback settings
@@ -310,16 +340,22 @@ def update_config():
         cfg["admin_password"] = data["admin_password"]
         if cfg["admin_password"] != old_cfg.get("admin_password"):
             messages.append(("success", "Admin password updated."))
-    if "wifi_ssid" in data and data["wifi_ssid"]:
-        wifi_ssid = data["wifi_ssid"].strip()
-        if wifi_ssid:
+    wifi_changed = False
+    if "wifi_ssid" in data:
+        wifi_ssid, ssid_error = sanitize_ssid(data["wifi_ssid"], old_cfg.get("wifi_ssid", cfg["wifi_ssid"]))
+        if ssid_error:
+            messages.append(("warning", ssid_error))
+        elif wifi_ssid != old_cfg.get("wifi_ssid"):
+            wifi_changed = True
             cfg["wifi_ssid"] = wifi_ssid
     if "wifi_password" in data and data["wifi_password"]:
-        cfg["wifi_password"] = data["wifi_password"]
-    if (
-        cfg.get("wifi_ssid") != old_cfg.get("wifi_ssid")
-        or cfg.get("wifi_password") != old_cfg.get("wifi_password")
-    ):
+        if len(data["wifi_password"]) < 8:
+            messages.append(("warning", "WiFi password must be at least 8 characters, so the previous password was kept."))
+        else:
+            if data["wifi_password"] != old_cfg.get("wifi_password"):
+                wifi_changed = True
+            cfg["wifi_password"] = data["wifi_password"]
+    if wifi_changed:
         messages.append(("warning", "WiFi settings saved. Re-run Pi 1 setup and update Pi 2 so it can reconnect."))
 
     write_config(cfg)
@@ -348,7 +384,7 @@ def new_session():
 
     # Create fresh session
     os.makedirs(CURRENT_DIR, exist_ok=True)
-    new_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    new_id = next_session_id()
     tmp = os.path.join(CURRENT_DIR, "session.id.tmp")
     with open(tmp, "w") as f:
         f.write(new_id)
@@ -631,7 +667,7 @@ Last backup: {{ last_backup or "never" }}</div>
       </div>
       <div>
         <label>WiFi SSID</label>
-        <input type="text" name="wifi_ssid" value="{{ cfg.wifi_ssid }}" maxlength="32" required>
+        <input type="text" name="wifi_ssid" value="{{ cfg.wifi_ssid|e }}" maxlength="32" pattern=".*\S+.*" required>
       </div>
     </div>
     <div class="stack">
@@ -640,7 +676,7 @@ Last backup: {{ last_backup or "never" }}</div>
         <input type="password" name="wifi_password" autocomplete="new-password" placeholder="Leave blank to keep the current WiFi password">
         <div class="helper">If you change this, Pi 1 must be reconfigured and Pi 2 must be updated to reconnect.</div>
       </div>
-      <div class="helper" style="margin-top:1.6rem">Current access point: <strong>{{ cfg.wifi_ssid }}</strong> at <strong>192.168.50.1</strong>.</div>
+      <div class="helper" style="margin-top:1.6rem">Current access point: <strong>{{ cfg.wifi_ssid|e }}</strong> at <strong>192.168.50.1</strong>.</div>
     </div>
   </div>
   <button type="submit">Save Admin / WiFi Settings</button>
@@ -744,6 +780,7 @@ function pollPi2(){
 // Poll Pi 1 status every 30s
 function pollPi1(){
   fetch('/api/pi1_status').then(r=>r.json()).then(d=>{
+    var fps={{ cfg.playback_fps|int }};
     document.getElementById('p1-uptime').textContent=d.uptime;
     document.getElementById('p1-temp').textContent=d.cpu_temp;
     document.getElementById('p1-disk-data').textContent=d.disk_data.used_gb+'/'+d.disk_data.total_gb+' GB';
@@ -752,7 +789,7 @@ function pollPi1(){
     document.getElementById('session-frames').textContent=d.frames;
     document.getElementById('session-id').textContent=d.session_id||'–';
     document.getElementById('session-last-capture').textContent=d.last_capture||'–';
-    document.getElementById('session-duration').textContent=((d.frames||0)/{{ cfg.playback_fps }}).toFixed(1)+'s';
+    document.getElementById('session-duration').textContent=(fps>0?((d.frames||0)/fps).toFixed(1):'0.0')+'s';
     refreshThumbnail((d.frames||0)>0);
   }).catch(()=>{});
 }
