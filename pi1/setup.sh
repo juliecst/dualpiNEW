@@ -174,10 +174,12 @@ systemctl disable --now wpa_supplicant 2>/dev/null || true
 if ! grep -q "interface wlan0" /etc/dhcpcd.conf 2>/dev/null; then
     cat >> /etc/dhcpcd.conf <<'EOF'
 
+# BEGIN TIMELAPSE AP
 # Timelapse AP — static IP for wlan0
 interface wlan0
     static ip_address=192.168.50.1/24
     nohook wpa_supplicant
+# END TIMELAPSE AP
 EOF
 fi
 

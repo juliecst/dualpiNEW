@@ -52,11 +52,22 @@ WPA_SUPPLICANT_CONF = "/etc/wpa_supplicant/wpa_supplicant.conf"
 NETWORKMANAGER_IGNORE_WLAN0 = "/etc/NetworkManager/conf.d/10-ignore-wlan0.conf"
 DHCPCD_CONF = "/etc/dhcpcd.conf"
 PI2_API_PORT = 5000
-AP_DHCPCD_BLOCK = """# Timelapse AP — static IP for wlan0
+PI2_DEFAULT_IP = "192.168.50.20"
+# libcamera-still expects --timeout in milliseconds.
+CAMERA_PREVIEW_TIMEOUT_MS = "1500"
+# fdisk commands: new DOS table, new primary partition 1, type 7 (exFAT/HPFS), write.
+USB_FDISK_SCRIPT = "o\nn\np\n1\n\n\nt\n7\nw\n"
+AP_DHCPCD_BLOCK = """# BEGIN TIMELAPSE AP
+# Timelapse AP — static IP for wlan0
 interface wlan0
     static ip_address=192.168.50.1/24
     nohook wpa_supplicant
+# END TIMELAPSE AP
 """
+AP_DHCPCD_BLOCK_PATTERNS = [
+    r"\n?# BEGIN TIMELAPSE AP\n# Timelapse AP — static IP for wlan0\ninterface wlan0\n\s*static ip_address=192\.168\.50\.1/24\n\s*nohook wpa_supplicant\n# END TIMELAPSE AP\n?",
+    r"\n?# Timelapse AP — static IP for wlan0\ninterface wlan0\n\s*static ip_address=192\.168\.50\.1/24\n\s*nohook wpa_supplicant\n?",
+]
 SESSION_NOTE_FILE = "session_note.txt"
 
 # ── config helpers ───────────────────────────────────────────────────────────
@@ -221,14 +232,14 @@ def get_pi1_network_summary(cfg: dict, current_host: str) -> dict:
     if mode == "ap":
         ap_name = cfg.get("wifi_ssid", "timelapse-ap")
         if wlan0["ipv4"]:
-            message = f"Pi 1 is serving the “{ap_name}” access point on {', '.join(wlan0['ipv4'])}."
+            message = f'Pi 1 is serving the "{ap_name}" access point on {", ".join(wlan0["ipv4"])}.'
         else:
-            message = f"Pi 1 should be serving the “{ap_name}” access point, but wlan0 does not currently show an IPv4 address."
+            message = f'Pi 1 should be serving the "{ap_name}" access point, but wlan0 does not currently show an IPv4 address.'
     elif mode == "wifi-client" and uplink_ssid:
         if wlan0["ipv4"]:
-            message = f"Pi 1 is joined to Wi-Fi network “{uplink_ssid}” on {', '.join(wlan0['ipv4'])}."
+            message = f'Pi 1 is joined to Wi-Fi network "{uplink_ssid}" on {", ".join(wlan0["ipv4"])}.'
         else:
-            message = f"Pi 1 is trying to join Wi-Fi network “{uplink_ssid}”, but wlan0 does not currently show an IPv4 address."
+            message = f'Pi 1 is trying to join Wi-Fi network "{uplink_ssid}", but wlan0 does not currently show an IPv4 address.'
     return {
         "mode": mode,
         "mode_label": mode_label,
@@ -275,7 +286,7 @@ def get_pi2_api_candidates() -> list:
                     add_candidate(parts[0])
     except Exception:
         pass
-    add_candidate("192.168.50.20")
+    add_candidate(PI2_DEFAULT_IP)
     return candidates
 
 
@@ -326,7 +337,7 @@ def capture_camera_preview():
     cmd = [
         binary,
         "--nopreview",
-        "--timeout", "1500",
+        "--timeout", CAMERA_PREVIEW_TIMEOUT_MS,
         "--width", "1280",
         "--height", "720",
         "--immediate",
@@ -351,12 +362,8 @@ def update_hostapd_credentials(cfg: dict):
 
 def set_ap_dhcpcd_enabled(enabled: bool):
     content = read_text(DHCPCD_CONF)
-    content = re.sub(
-        r"\n?# Timelapse AP — static IP for wlan0\ninterface wlan0\n\s*static ip_address=192\.168\.50\.1/24\n\s*nohook wpa_supplicant\n?",
-        "\n",
-        content,
-        flags=re.MULTILINE,
-    )
+    for pattern in AP_DHCPCD_BLOCK_PATTERNS:
+        content = re.sub(pattern, "\n", content, flags=re.MULTILINE)
     if enabled:
         content = content.rstrip() + "\n\n" + AP_DHCPCD_BLOCK
     write_text(DHCPCD_CONF, content.strip() + "\n")
@@ -477,6 +484,18 @@ def list_usb_devices() -> list:
     return sorted(devices, key=lambda device: device["size"], reverse=True)
 
 
+def get_device_partition(dev: str) -> str:
+    result = run_command(["lsblk", "-lnpo", "NAME,TYPE", dev], timeout=10, check=True)
+    partitions = []
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[1] == "part":
+            partitions.append(parts[0])
+    if not partitions:
+        raise RuntimeError(f"Partitioning {dev} did not create a usable partition.")
+    return partitions[0]
+
+
 def update_fstab_mounts(working_uuid: str, backup_uuid: str):
     current_lines = []
     for line in read_text("/etc/fstab").splitlines():
@@ -499,13 +518,15 @@ def format_and_mount_usb_sticks():
     backup_dev = usb_devices[1]["path"]
     for dev in [working_dev, backup_dev]:
         run_command(["wipefs", "-a", dev], timeout=20, check=True)
-        run_command(["fdisk", dev], timeout=20, input_text="o\nn\np\n1\n\n\nt\n7\nw\n")
+        fdisk_result = run_command(["fdisk", dev], timeout=20, input_text=USB_FDISK_SCRIPT)
+        if fdisk_result.returncode != 0:
+            raise RuntimeError(fdisk_result.stderr.strip() or f"fdisk failed while preparing {dev}.")
         time.sleep(1)
-        partition = f"{dev}1" if os.path.exists(f"{dev}1") else dev
+        partition = get_device_partition(dev)
         run_command(["mkfs.exfat", "-n", "TIMELAPSE", partition], timeout=60, check=True)
     time.sleep(1)
-    working_part = f"{working_dev}1" if os.path.exists(f"{working_dev}1") else working_dev
-    backup_part = f"{backup_dev}1" if os.path.exists(f"{backup_dev}1") else backup_dev
+    working_part = get_device_partition(working_dev)
+    backup_part = get_device_partition(backup_dev)
     working_uuid = run_command(["blkid", "-s", "UUID", "-o", "value", working_part], timeout=10, check=True).stdout.strip()
     backup_uuid = run_command(["blkid", "-s", "UUID", "-o", "value", backup_part], timeout=10, check=True).stdout.strip()
     update_fstab_mounts(working_uuid, backup_uuid)
@@ -644,9 +665,9 @@ def get_pi1_wifi_status(cfg: dict) -> dict:
         return build_status(
             "warning",
             "Pending",
-            f"Pi 1 hostapd is still serving “{applied_ssid}”, while the saved dashboard settings expect “{configured_ssid}”.",
+            f'Pi 1 hostapd is still serving "{applied_ssid}", while the saved dashboard settings expect "{configured_ssid}".',
         )
-    return build_status("ok", "Applied", f"Pi 1 is already serving the “{configured_ssid}” access point.")
+    return build_status("ok", "Applied", f'Pi 1 is already serving the "{configured_ssid}" access point.')
 
 
 def get_backup_status(last_backup: str) -> dict:
@@ -662,7 +683,7 @@ def get_backup_status(last_backup: str) -> dict:
     try:
         last_backup_dt = datetime.fromisoformat(last_backup)
     except Exception:
-        return build_status("warning", "Unknown", f"Backup timestamp “{last_backup}” could not be parsed.")
+        return build_status("warning", "Unknown", f'Backup timestamp "{last_backup}" could not be parsed.')
     backup_age = datetime.now() - last_backup_dt
     if backup_age > timedelta(hours=26):
         return build_status("warning", "Stale", f"Last successful backup was {last_backup_dt.isoformat(timespec='minutes')}.")
@@ -981,7 +1002,7 @@ def network_mode():
     except Exception as exc:
         flash(f"Could not switch Pi 1 network mode: {exc}", "error")
     else:
-        label = "Wi-Fi client" if mode == "wifi-client" else "access-point"
+        label = "Wi-Fi client" if mode == "wifi-client" else "access point"
         flash(f"Pi 1 switched to {label} mode.", "success")
     return redirect(url_for("dashboard"))
 
@@ -1278,9 +1299,9 @@ font-size:.65rem;color:#fff;position:relative;transition:height .3s}
   <input type="hidden" name="section" value="capture">
   <div class="grid">
     <div>
-      <label>Capture Interval</label>
-      <input type="number" name="capture_interval_minutes" min="1" max="1440" step="1" value="{{ cfg.capture_interval_minutes }}">
-      <div class="helper">Enter any whole number from 1 to 1440 minutes.</div>
+      <label for="capture-interval">Capture Interval</label>
+      <input id="capture-interval" type="number" name="capture_interval_minutes" min="1" max="1440" step="1" value="{{ cfg.capture_interval_minutes }}" aria-describedby="capture-interval-help">
+      <div class="helper" id="capture-interval-help">Enter any whole number from 1 to 1440 minutes.</div>
     </div>
     <div>
       <label>Exposure Mode</label>
@@ -1548,6 +1569,7 @@ font-size:.65rem;color:#fff;position:relative;transition:height .3s}
           <div>If setup started before both USB sticks were connected, you can finish the storage setup from here later.</div>
           <div>This formats the two largest USB drives as exFAT and mounts them as <strong>/data</strong> and <strong>/backup</strong>.</div>
         </div>
+        <div class="warning-banner" role="alert" style="margin-top:.85rem">Formatting USB storage erases both selected drives. Only run this after confirming the correct sticks are connected.</div>
         <div class="actions" style="margin-top:.85rem">
           <form method="POST" action="/api/setup_usb" onsubmit="return confirm('Format the two largest USB drives as /data and /backup? This erases them.');" style="width:100%">
             <button type="submit" class="btn-danger">Format / Mount USB Sticks</button>
@@ -1698,7 +1720,9 @@ function pollPi2(){
       document.getElementById('p2-temp').textContent=d.cpu_temp||'–';
       document.getElementById('p2-disk').textContent=(d.disk_used_gb||0)+'/'+(d.disk_total_gb||0)+' GB';
       document.getElementById('p2-sync').textContent=d.last_sync_timestamp||'–';
-      document.getElementById('p2-wifi').textContent=(d.wifi_message||'–')+(d.pi2_host?' via '+d.pi2_host:'');
+      var pi2WifiText=d.wifi_message||'–';
+      if(d.pi2_host){pi2WifiText+=' via '+d.pi2_host}
+      document.getElementById('p2-wifi').textContent=pi2WifiText;
     })
     .catch(()=>{
       clearTimeout(tid);
