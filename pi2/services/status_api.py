@@ -12,6 +12,7 @@ import glob
 import os
 import subprocess
 import time
+import threading
 import logging
 import sys
 
@@ -30,6 +31,8 @@ LOCAL_CACHE = "/data/cache"
 LAST_SYNC_FILE = "/data/last_sync.txt"
 MPV_SOCKET = "/tmp/mpv-socket"
 CONFIG_LOCAL = "/data/config_local.json"
+WIFI_STATUS_CACHE = {"timestamp": 0.0, "expected_ssid": None, "value": {"state": "warning", "message": "WiFi connection unavailable"}}
+WIFI_STATUS_LOCK = threading.Lock()
 
 
 def read_config() -> dict:
@@ -130,23 +133,34 @@ def get_wifi_ip() -> str:
 
 
 def get_wifi_status(expected_ssid: str) -> dict:
+    now = time.time()
+    with WIFI_STATUS_LOCK:
+        if (
+            WIFI_STATUS_CACHE["expected_ssid"] == expected_ssid
+            and now - WIFI_STATUS_CACHE["timestamp"] < 5
+        ):
+            return dict(WIFI_STATUS_CACHE["value"])
     current_ssid = get_wifi_ssid()
     current_ip = get_wifi_ip()
     if current_ssid and current_ssid == expected_ssid:
         details = current_ssid
         if current_ip:
             details += f" ({current_ip})"
-        return {"state": "ok", "message": details}
-    if current_ssid:
+        value = {"state": "ok", "message": details}
+    elif current_ssid:
         details = f"Connected to {current_ssid}"
         if current_ip:
             details += f" ({current_ip})"
         if expected_ssid:
             details += f", expected {expected_ssid}"
-        return {"state": "warning", "message": details}
-    if expected_ssid:
-        return {"state": "warning", "message": f"Not connected to {expected_ssid}"}
-    return {"state": "warning", "message": "WiFi connection unavailable"}
+        value = {"state": "warning", "message": details}
+    elif expected_ssid:
+        value = {"state": "warning", "message": f"Not connected to {expected_ssid}"}
+    else:
+        value = {"state": "warning", "message": "WiFi connection unavailable"}
+    with WIFI_STATUS_LOCK:
+        WIFI_STATUS_CACHE.update({"timestamp": now, "expected_ssid": expected_ssid, "value": value})
+    return dict(value)
 
 
 def get_playback_state() -> str:

@@ -10,6 +10,7 @@ session management, and system monitoring.
 import json
 import os
 import glob
+import heapq
 import shutil
 import subprocess
 import time
@@ -235,7 +236,7 @@ def get_pi1_wifi_status(cfg: dict) -> dict:
         return build_status(
             "warning",
             "Pending",
-            f"Pi 1 setup still needs rerun to switch the AP from “{applied_ssid}” to “{configured_ssid}”.",
+            f"Pi 1 setup still needs to be rerun to switch the AP from “{applied_ssid}” to “{configured_ssid}”.",
         )
     return build_status("ok", "Applied", f"Pi 1 is already serving the “{configured_ssid}” access point.")
 
@@ -299,12 +300,11 @@ def short_session_label(name: str) -> str:
 
 
 def estimate_frame_size(directory: str, sample_size: int = 24) -> int:
-    frames = sorted(glob.glob(os.path.join(directory, "frame_*.jpg")))
+    frames = heapq.nlargest(sample_size, glob.glob(os.path.join(directory, "frame_*.jpg")))
     if not frames:
         return 0
-    sample = frames[-sample_size:]
     sizes = []
-    for frame in sample:
+    for frame in frames:
         try:
             sizes.append(os.path.getsize(frame))
         except OSError:
@@ -314,9 +314,9 @@ def estimate_frame_size(directory: str, sample_size: int = 24) -> int:
 
 def build_storage_projection(frames: int, archives: list, disk_data: dict, capture_interval_minutes: int) -> dict:
     average_frame_bytes = estimate_frame_size(CURRENT_DIR)
-    remaining_frames = int(disk_data.get("free_bytes", 0) / average_frame_bytes) if average_frame_bytes else 0
-    remaining_hours = round((remaining_frames * capture_interval_minutes) / 60.0, 1) if remaining_frames else 0
-    remaining_days = round(remaining_hours / 24.0, 1) if remaining_hours else 0
+    remaining_frames = int(disk_data.get("free_bytes", 0) / average_frame_bytes) if average_frame_bytes else None
+    remaining_hours = round((remaining_frames * capture_interval_minutes) / 60.0, 1) if remaining_frames is not None else None
+    remaining_days = round(remaining_hours / 24.0, 1) if remaining_hours is not None else None
     chart = []
     recent_archives = list(reversed(archives[:5]))
     for archive in recent_archives:
@@ -331,6 +331,11 @@ def build_storage_projection(frames: int, archives: list, disk_data: dict, captu
         "remaining_frames": remaining_frames,
         "remaining_hours": remaining_hours,
         "remaining_days": remaining_days,
+        "estimate_message": (
+            "Estimate uses recent JPG sizes from the current session and the free space on the working stick."
+            if average_frame_bytes
+            else "Storage estimate becomes available after a few frames have been captured."
+        ),
         "chart": chart,
         "chart_max_frames": max_frames,
     }
@@ -821,7 +826,7 @@ font-size:.65rem;color:#fff;position:relative;transition:height .3s}
     </div>
   </div>
   <div style="margin-top:1rem" class="actions">
-    <button class="btn-danger" type="button" onclick="confirmNewSession({{ frames }}, '{{ session_id }}', '{{ next_session_preview }}')">
+    <button class="btn-danger" type="button" onclick='confirmNewSession({{ frames|tojson }}, {{ session_id|tojson }}, {{ next_session_preview|tojson }})'>
       Start New Session</button>
     <form id="new-session-form" method="POST" action="/api/new_session" style="display:none"></form>
   </div>
@@ -870,13 +875,13 @@ font-size:.65rem;color:#fff;position:relative;transition:height .3s}
     <div class="stack">
       <div class="stat-row">
         <div class="stat-box"><div class="stat">{{ storage_projection.average_frame_mb }}</div><div class="stat-label">Avg Frame MB</div></div>
-        <div class="stat-box"><div class="stat">{{ storage_projection.remaining_frames }}</div><div class="stat-label">Frames Remaining</div></div>
+        <div class="stat-box"><div class="stat">{{ storage_projection.remaining_frames if storage_projection.remaining_frames is not none else "–" }}</div><div class="stat-label">Frames Remaining</div></div>
       </div>
       <div class="stat-row">
-        <div class="stat-box"><div class="stat">{{ storage_projection.remaining_hours }}</div><div class="stat-label">Hours Left</div></div>
-        <div class="stat-box"><div class="stat">{{ storage_projection.remaining_days }}</div><div class="stat-label">Days Left</div></div>
+        <div class="stat-box"><div class="stat">{{ storage_projection.remaining_hours if storage_projection.remaining_hours is not none else "–" }}</div><div class="stat-label">Hours Left</div></div>
+        <div class="stat-box"><div class="stat">{{ storage_projection.remaining_days if storage_projection.remaining_days is not none else "–" }}</div><div class="stat-label">Days Left</div></div>
       </div>
-      <div class="helper">Estimate uses recent JPG sizes from the current session and the free space on the working stick.</div>
+      <div class="helper">{{ storage_projection.estimate_message }}</div>
     </div>
   </div>
 </div>
@@ -1031,9 +1036,13 @@ function refreshThumbnail(hasFrames){
   thumb.src='/api/thumbnail?ts='+Date.now();
 }
 
+function parsePi2Response(response){
+  return response.json().catch(()=>({})).then(data=>({ok:response.ok,data:data}));
+}
+
 function runPi2Action(path, successMessage){
   return fetch('http://192.168.50.20:5000'+path,{method:'POST'})
-    .then(r=>r.json().catch(()=>({})).then(data=>({ok:r.ok,data:data})))
+    .then(parsePi2Response)
     .then(({ok,data})=>{
       if(!ok || data.error){throw new Error(data.error||'Pi 2 action failed')}
       if(successMessage){alert(successMessage)}
@@ -1048,7 +1057,7 @@ function setBrightness(showSuccess){
     method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({value:parseInt(v)})
   })
-    .then(r=>r.json().catch(()=>({})).then(data=>({ok:r.ok,data:data})))
+    .then(parsePi2Response)
     .then(({ok,data})=>{
       if(!ok || data.error){throw new Error(data.error||'Brightness update failed')}
       if(showSuccess){alert('Pi 2 brightness test sent.')}
