@@ -126,6 +126,8 @@ if [[ ! -f /data/config.json ]]; then
   "admin_password": "changeme",
   "wifi_ssid": "timelapse-ap",
   "wifi_password": "changeme2",
+  "uplink_wifi_ssid": "",
+  "uplink_wifi_password": "",
   "display_type": "hdmi"
 }
 CONF
