@@ -16,13 +16,20 @@ log() { logger -t "$LOG_TAG" "$*"; echo "[$(date '+%F %T')] $*"; }
 
 # Read FPS from config
 FPS=25
+VIDEO_BACKUP_ENABLED=true
 for cfg_path in "$CONFIG_REMOTE" "$CONFIG_LOCAL"; do
     real_path=$(realpath "$cfg_path" 2>/dev/null) || continue
     if [[ -f "$real_path" ]]; then
         FPS=$(jq -r '.playback_fps // 25' "$real_path" 2>/dev/null) || FPS=25
+        VIDEO_BACKUP_ENABLED=$(jq -r 'if has("ffmpeg_video_backup_enabled") then .ffmpeg_video_backup_enabled else true end' "$real_path" 2>/dev/null) || VIDEO_BACKUP_ENABLED=true
         break
     fi
 done
+
+if [[ "$VIDEO_BACKUP_ENABLED" != "true" ]]; then
+    log "Optional FFmpeg video backup disabled in config — skipping render"
+    exit 0
+fi
 
 # Count frames
 FRAME_COUNT=$(find "$CACHE_DIR" -maxdepth 1 -name 'frame_*.jpg' 2>/dev/null | wc -l)

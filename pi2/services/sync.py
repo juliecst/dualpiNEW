@@ -25,6 +25,7 @@ logging.basicConfig(
 log = logging.getLogger("sync")
 
 REMOTE_DIR = "/mnt/timelapse/current"
+REMOTE_MOUNT = "/mnt/timelapse"
 LOCAL_CACHE = "/data/cache"
 LOCAL_SESSION = os.path.join(LOCAL_CACHE, "session.id")
 REMOTE_SESSION = os.path.join(REMOTE_DIR, "session.id")
@@ -48,8 +49,25 @@ def read_file_safe(path: str) -> str:
 
 
 def remote_available() -> bool:
-    """Check if the Samba mount is accessible."""
-    return os.path.isdir(REMOTE_DIR) and os.listdir(REMOTE_DIR)
+    """Ensure the Samba mount is available, even after cold boots/outages."""
+    if os.path.isfile(REMOTE_SESSION):
+        return True
+
+    try:
+        result = subprocess.run(
+            ["mount", REMOTE_MOUNT],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode == 0:
+            log.info("Mounted Pi 1 timelapse share at %s", REMOTE_MOUNT)
+        elif result.stderr.strip():
+            log.warning("Mount retry returned %d: %s", result.returncode, result.stderr.strip())
+    except Exception as e:
+        log.warning("Mount retry failed: %s", e)
+
+    return os.path.isfile(REMOTE_SESSION)
 
 
 def get_remote_session() -> str:
@@ -97,7 +115,7 @@ def main():
     while True:
         try:
             if not remote_available():
-                log.warning("Remote share not available — skipping sync")
+                log.warning("Remote share not available yet — waiting for Pi 1 WiFi/share startup")
                 time.sleep(SYNC_INTERVAL)
                 continue
 

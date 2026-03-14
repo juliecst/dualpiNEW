@@ -151,7 +151,7 @@ info "Configuring Samba mount…"
 # Append fstab entry
 if ! grep -q "192.168.50.1/timelapse" /etc/fstab; then
     cat >> /etc/fstab <<'EOF'
-//192.168.50.1/timelapse  /mnt/timelapse  cifs  guest,_netdev,nofail,uid=1000,gid=1000,iocharset=utf8,vers=3.0  0  0
+//192.168.50.1/timelapse  /mnt/timelapse  cifs  guest,_netdev,nofail,x-systemd.automount,uid=1000,gid=1000,iocharset=utf8,vers=3.0  0  0
 EOF
 fi
 
