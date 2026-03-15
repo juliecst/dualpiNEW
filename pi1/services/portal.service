@@ -2,6 +2,7 @@
 Description=Timelapse Admin Portal (Flask)
 After=network.target local-fs.target
 Wants=network.target
+RequiresMountsFor=/data
 
 [Service]
 Type=simple

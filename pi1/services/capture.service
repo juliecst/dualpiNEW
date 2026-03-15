@@ -2,6 +2,7 @@
 Description=Timelapse Photo Capture Service
 After=local-fs.target
 Wants=local-fs.target
+RequiresMountsFor=/data
 
 [Service]
 Type=simple
