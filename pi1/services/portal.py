@@ -53,7 +53,7 @@ NETWORKMANAGER_IGNORE_WLAN0 = "/etc/NetworkManager/conf.d/10-ignore-wlan0.conf"
 DHCPCD_CONF = "/etc/dhcpcd.conf"
 PI2_API_PORT = 5000
 PI2_DEFAULT_IP = "192.168.50.20"
-# libcamera-still expects --timeout in milliseconds.
+# rpicam-still expects --timeout in milliseconds.
 CAMERA_PREVIEW_TIMEOUT_MS = "1500"
 # fdisk commands: new DOS table, new primary partition 1, type 7 (exFAT/HPFS), write.
 USB_FDISK_SCRIPT = "o\nn\np\n1\n\n\nt\n7\nw\n"
@@ -311,18 +311,18 @@ def proxy_pi2_request(path: str, method: str = "GET", payload: dict = None):
     return {"error": last_error}, 502
 
 
-def get_libcamera_status() -> dict:
-    binary = shutil.which("libcamera-still")
+def get_rpicam_status() -> dict:
+    binary = shutil.which("rpicam-still")
     if not binary:
         return build_status(
             "error",
             "Missing",
-            "libcamera-still is not installed on Pi 1. Pi 1 setup installs it in step 1 before the AP is created.",
+            "rpicam-still is not installed on Pi 1. Pi 1 setup installs it in step 1 before the AP is created.",
         )
     preview_exists = os.path.isfile(CAMERA_PREVIEW_PATH)
-    message = "libcamera-still is installed on Pi 1 and ready for a live preview capture."
+    message = "rpicam-still is installed on Pi 1 and ready for a live preview capture."
     if preview_exists:
-        message = "libcamera-still is installed. The most recent preview image is shown below."
+        message = "rpicam-still is installed. The most recent preview image is shown below."
     status = build_status("ok", "Ready", message)
     status["preview_available"] = preview_exists
     status["preview_timestamp"] = int(os.path.getmtime(CAMERA_PREVIEW_PATH)) if preview_exists else 0
@@ -330,9 +330,9 @@ def get_libcamera_status() -> dict:
 
 
 def capture_camera_preview():
-    binary = shutil.which("libcamera-still")
+    binary = shutil.which("rpicam-still")
     if not binary:
-        raise RuntimeError("libcamera-still is not installed on Pi 1 yet.")
+        raise RuntimeError("rpicam-still is not installed on Pi 1 yet.")
     tmp_path = CAMERA_PREVIEW_PATH + ".tmp"
     cmd = [
         binary,
@@ -345,7 +345,7 @@ def capture_camera_preview():
     ]
     result = run_command(cmd, timeout=20)
     if result.returncode != 0:
-        raise RuntimeError(result.stderr.strip() or "libcamera-still preview failed")
+        raise RuntimeError(result.stderr.strip() or "rpicam-still preview failed")
     os.replace(tmp_path, CAMERA_PREVIEW_PATH)
 
 
@@ -832,7 +832,7 @@ def dashboard():
     wifi_status = get_pi1_wifi_status(cfg)
     current_host = (request.host.split(":", 1)[0] or "").strip("[]")
     network_info = get_pi1_network_summary(cfg, current_host)
-    camera_status = get_libcamera_status()
+    camera_status = get_rpicam_status()
     storage_projection = build_storage_projection(
         frames,
         archives,
