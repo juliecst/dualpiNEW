@@ -19,12 +19,25 @@ error() { echo -e "${RED}[ERROR]${NC} $*"; exit 1; }
 [[ $EUID -eq 0 ]] || error "This script must be run as root."
 
 ###############################################################################
+# 0. Sync system clock (Raspberry Pi has no hardware RTC; clock may be wrong)
+###############################################################################
+info "Syncing system clock via NTP to prevent apt certificate errors…"
+timedatectl set-ntp true
+systemctl start systemd-timesyncd 2>/dev/null || true
+# Wait up to 30 s for a rough sync; proceed even if unavailable
+for _i in $(seq 30); do
+    timedatectl status 2>/dev/null | grep -q "synchronized: yes" && break
+    sleep 1
+done
+info "Current time: $(date)"
+
+###############################################################################
 # 1. Install packages
 ###############################################################################
 info "Updating apt and installing packages…"
 apt-get update -qq
 apt-get install -y \
-  hostapd dnsmasq chrony samba samba-common-bin \
+  hostapd dnsmasq chrony fake-hwclock samba samba-common-bin \
   python3-flask python3-pillow python3-pip \
   rpicam-apps rsync exfatprogs iptables \
   ffmpeg jq
