@@ -16,7 +16,7 @@ A production-ready, self-healing timelapse capture and display system designed f
 │  Pi 1 — Camera Pi           │◄─────────────────────────────►│  Pi 2 — Display Pi           │
 │  192.168.50.1               │   SSID: timelapse-ap          │  192.168.50.20               │
 │                             │                                │                              │
-│  • libcamera capture        │   Samba share ───────────────►│  • Image sync (rsync)        │
+│  • rpicam capture           │   Samba share ───────────────►│  • Image sync (rsync)        │
 │  • Flask admin portal :80   │                                │  • mpv playback              │
 │  • Samba shares             │   NTP time sync ─────────────►│  • Flask status API :5000    │
 │  • Chrony NTP server        │                                │  • ffmpeg rendering          │
@@ -93,6 +93,33 @@ The installation is safe to switch off at night and power back on in the morning
 - **The handshake is session-based.** Pi 2 watches `session.id`; when it sees a new session it wipes its local cache and syncs the fresh frames, and when the session is unchanged it simply resumes syncing where it left off.
 - **Sudden power cuts are survivable.** The services use atomic temp-file renames for config, capture, sync, and backup markers, so incomplete writes are discarded on the next boot. Capture resumes from the last fully written frame number in the current session.
 
+### Re-enable autostart manually
+
+If you ran `setup.sh`, autostart is already enabled on both Pis. If you ever disable services for maintenance and want to restore the normal boot behavior, run these commands:
+
+#### Pi 1 autostart
+
+```bash
+ssh pi@192.168.50.1
+sudo systemctl enable hostapd dnsmasq chrony smbd nmbd capture.service portal.service
+sudo systemctl restart hostapd dnsmasq chrony smbd nmbd
+sudo systemctl start capture.service portal.service
+```
+
+This makes Pi 1 bring up the AP, NTP server, Samba share, capture loop, and admin portal automatically at boot.
+
+#### Pi 2 autostart
+
+```bash
+ssh pi@192.168.50.20
+sudo systemctl enable wifi-retry.service chrony sync.service playback.service status_api.service
+sudo systemctl start wifi-retry.service
+sudo systemctl restart chrony
+sudo systemctl start sync.service playback.service status_api.service
+```
+
+This makes Pi 2 reconnect to Pi 1 automatically, resync images, relaunch playback, and restore the status API on every boot.
+
 ---
 
 ## SSH Access Via the AP Network
@@ -122,7 +149,7 @@ The dashboard provides:
 - **Session management:** preview before archiving, archived-session labels, and start new session
 - **Playback settings:** FPS selector, brightness test, restart playback, resync now, duration calculator, and an optional FFmpeg video-backup toggle
 - **Admin & network settings:** update the portal password, see the current Pi 1 access IPs, change the AP SSID/password, and toggle Pi 1 between AP mode and an upstream WiFi client
-- **Setup & maintenance:** capture a live camera preview, verify libcamera availability, and format/mount the two USB sticks later from the dashboard if setup started without them
+- **Setup & maintenance:** capture a live camera preview, verify rpicam availability, and format/mount the two USB sticks later from the dashboard if setup started without them
 - **System status:** uptime, CPU temp, disk usage, and WiFi health for both Pis
 - **Backup monitoring:** live backup/disk health checks, frame growth chart, and storage estimates
 
@@ -387,7 +414,7 @@ journalctl -u wifi-retry.service -f
 ### No Frames Being Captured
 ```bash
 # Check if camera is detected
-libcamera-hello --list-cameras
+rpicam-hello --list-cameras
 
 # Check capture service
 sudo systemctl status capture.service

@@ -26,7 +26,7 @@ apt-get update -qq
 apt-get install -y \
   hostapd dnsmasq chrony samba samba-common-bin \
   python3-flask python3-pillow python3-pip \
-  libcamera-apps rsync exfatprogs iptables \
+  rpicam-apps rsync exfatprogs iptables \
   ffmpeg jq
 
 ###############################################################################

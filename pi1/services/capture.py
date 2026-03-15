@@ -3,7 +3,7 @@
 Pi 1 — Photo Capture Service
 Timelapse Art Installation
 
-Captures frames at a configurable interval using libcamera-still.
+Captures frames at a configurable interval using rpicam-still.
 Supports auto and manual exposure modes, optional luma correction.
 Polls config.json for live setting changes.
 """
@@ -77,13 +77,13 @@ def next_frame_number() -> int:
 
 
 def capture_frame(cfg: dict, frame_num: int) -> str:
-    """Capture a single frame with libcamera-still. Returns output path."""
+    """Capture a single frame with rpicam-still. Returns output path."""
     fname = f"frame_{frame_num:06d}.jpg"
     tmp_path = os.path.join(CURRENT_DIR, fname + ".tmp")
     final_path = os.path.join(CURRENT_DIR, fname)
 
     cmd = [
-        "libcamera-still",
+        "rpicam-still",
         "--nopreview",
         "--timeout", "3000",       # 3 s AE/AWB convergence
         "-o", tmp_path,
@@ -95,14 +95,14 @@ def capture_frame(cfg: dict, frame_num: int) -> str:
     if cfg["exposure_mode"] == "manual":
         shutter = cfg.get("exposure_shutter_speed", 10000)
         iso = cfg.get("exposure_iso", 100)
-        # libcamera uses gain, not ISO directly.  ISO 100 ≈ gain 1.0
+        # rpicam uses gain, not ISO directly. ISO 100 ≈ gain 1.0
         gain = iso / 100.0
         cmd += ["--shutter", str(shutter), "--analoggain", str(gain)]
 
     log.info("Capturing frame %06d …", frame_num)
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
     if result.returncode != 0:
-        log.error("libcamera-still failed: %s", result.stderr.strip())
+        log.error("rpicam-still failed: %s", result.stderr.strip())
         raise RuntimeError(f"Capture failed: {result.stderr.strip()}")
 
     os.rename(tmp_path, final_path)
