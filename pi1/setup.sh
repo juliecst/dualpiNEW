@@ -223,6 +223,15 @@ iptables-save > /etc/iptables/rules.v4
 systemctl unmask hostapd 2>/dev/null || true
 systemctl enable hostapd dnsmasq
 
+# Install and enable the wlan0 static-IP service.
+# This ensures 192.168.50.1/24 is always assigned to wlan0 after hostapd
+# starts on every boot, regardless of whether dhcpcd or NetworkManager is
+# the active network manager (Bookworm's NM ignores wlan0, leaving it
+# address-less without this service).
+cp "$SCRIPT_DIR/services/wlan0-static-ip.service" /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable wlan0-static-ip.service
+
 ###############################################################################
 # 5. Chrony NTP server
 ###############################################################################
@@ -311,7 +320,10 @@ systemctl restart systemd-journald 2>/dev/null || true
 ###############################################################################
 info "Starting services…"
 systemctl restart dhcpcd 2>/dev/null || true
-systemctl restart hostapd dnsmasq chrony smbd nmbd 2>/dev/null || true
+systemctl restart hostapd 2>/dev/null || true
+# Assign 192.168.50.1/24 to wlan0 immediately after hostapd is up
+systemctl restart wlan0-static-ip.service 2>/dev/null || true
+systemctl restart dnsmasq chrony smbd nmbd 2>/dev/null || true
 systemctl start capture.service portal.service
 
 info "═══════════════════════════════════════════════════════"
