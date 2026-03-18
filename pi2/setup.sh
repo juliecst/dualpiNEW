@@ -179,9 +179,47 @@ EOF
 systemctl enable chrony
 
 ###############################################################################
-# 4. Detect and format USB stick (optional, for local cache storage)
+# 4. Detect and set up USB stick (preserve existing pictures or format)
 ###############################################################################
-format_usb_stick() {
+
+# Count picture/video files on a USB partition.
+# Prints count to stdout. Temporarily mounts read-only, then unmounts.
+_count_pictures() {
+    local part="$1"
+    local fs_type
+    fs_type=$(blkid -s TYPE -o value "$part" 2>/dev/null || echo "")
+    if [[ -z "$fs_type" ]]; then echo "0"; return; fi
+
+    # Unmount if auto-mounted
+    umount "$part" 2>/dev/null || true
+
+    local tmp_mnt count=0
+    tmp_mnt=$(mktemp -d)
+    if mount -o ro "$part" "$tmp_mnt" 2>/dev/null; then
+        count=$(find "$tmp_mnt" -maxdepth 5 \
+            \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" \
+               -o -iname "*.dng" -o -iname "*.tiff" -o -iname "*.mp4" \) \
+            2>/dev/null | wc -l)
+        umount "$tmp_mnt" 2>/dev/null || true
+    fi
+    rmdir "$tmp_mnt" 2>/dev/null || true
+    echo "$count"
+}
+
+# Format a single block device as exFAT. Device must be unmounted first.
+_format_device_exfat() {
+    local dev="$1" label="$2"
+    info "Formatting $dev as exFAT…"
+    wipefs -a "$dev"
+    echo -e "o\nn\np\n1\n\n\nt\n7\nw" | fdisk "$dev" || true
+    sleep 1
+    local part="${dev}1"
+    [[ -b "$part" ]] || part="$dev"
+    mkfs.exfat -n "$label" "$part"
+    sleep 1
+}
+
+setup_usb_stick() {
     info "Detecting USB block devices for local cache storage…"
 
     mapfile -t USB_DEVS < <(
@@ -204,30 +242,52 @@ format_usb_stick() {
     USB_DEV="${SORTED[0]}"
     info "USB stick for local cache: $USB_DEV"
 
+    local part="${USB_DEV}1"
+    [[ -b "$part" ]] || part="$USB_DEV"
+
+    # Check for existing pictures / videos
+    local img_count fs_type uuid
+    img_count=$(_count_pictures "$part")
+
+    if [[ "$img_count" -gt 0 ]]; then
+        fs_type=$(blkid -s TYPE -o value "$part" 2>/dev/null || echo "unknown")
+        info "Found $img_count picture/video file(s) on $USB_DEV ($fs_type filesystem)."
+        read -rp "Keep existing data on $USB_DEV? [Y/n] " preserve_yn
+        if [[ ! "$preserve_yn" =~ ^[Nn]$ ]]; then
+            info "Preserving existing data on $USB_DEV."
+            uuid=$(blkid -s UUID -o value "$part")
+            info "USB UUID: $uuid"
+
+            sed -i '\|/data |d' /etc/fstab
+            echo "UUID=${uuid}  /data  ${fs_type}  defaults,nofail,uid=1000,gid=1000,dmask=0022,fmask=0133  0  0" >> /etc/fstab
+
+            mkdir -p /data
+            mount -a
+            info "USB stick mounted at /data (existing data preserved)."
+            return 0
+        fi
+    fi
+
+    # No pictures found, or user chose not to preserve — offer to format
     read -rp "Format USB stick as exFAT for local cache/renders? ALL DATA WILL BE LOST. [y/N] " yn
     [[ "$yn" =~ ^[Yy]$ ]] || { warn "Skipping USB format."; return 1; }
 
-    info "Formatting $USB_DEV as exFAT…"
-    wipefs -a "$USB_DEV"
-    # Create partition table: new DOS table, primary partition 1, type 7 (HPFS/NTFS/exFAT), write
-    echo -e "o\nn\np\n1\n\n\nt\n7\nw" | fdisk "$USB_DEV" || true
-    sleep 1
-    PART="${USB_DEV}1"
-    [[ -b "$PART" ]] || PART="$USB_DEV"
-    mkfs.exfat -n PI2CACHE "$PART"
+    # Unmount all partitions of the device before formatting
+    umount "${USB_DEV}"* 2>/dev/null || true
+    sleep 0.5
 
-    sleep 1
-    # Re-check partition path after kernel re-reads table
-    [[ -b "${USB_DEV}1" ]] && PART="${USB_DEV}1" || PART="$USB_DEV"
-    USB_UUID=$(blkid -s UUID -o value "$PART")
+    _format_device_exfat "$USB_DEV" "PI2CACHE"
 
-    info "USB UUID: $USB_UUID"
+    [[ -b "${USB_DEV}1" ]] && part="${USB_DEV}1" || part="$USB_DEV"
+    uuid=$(blkid -s UUID -o value "$part")
+
+    info "USB UUID: $uuid"
 
     # Remove old /data USB entry if present
     sed -i '\|/data |d' /etc/fstab
 
     cat >> /etc/fstab <<EOF
-UUID=${USB_UUID}  /data  exfat  defaults,nofail,uid=1000,gid=1000,dmask=0022,fmask=0133  0  0
+UUID=${uuid}  /data  exfat  defaults,nofail,uid=1000,gid=1000,dmask=0022,fmask=0133  0  0
 EOF
 
     mkdir -p /data
@@ -235,9 +295,9 @@ EOF
     info "USB stick mounted at /data."
 }
 
-# Only format if /data is not already a USB mount
+# Only set up if /data is not already a USB mount
 if ! mountpoint -q /data 2>/dev/null; then
-    format_usb_stick || warn "USB setup skipped — using SD card for /data."
+    setup_usb_stick || warn "USB setup skipped — using SD card for /data."
 fi
 
 ###############################################################################
