@@ -181,6 +181,7 @@ format_usb_stick() {
 
     info "Formatting $USB_DEV as exFAT…"
     wipefs -a "$USB_DEV"
+    # Create partition table: new DOS table, primary partition 1, type 7 (HPFS/NTFS/exFAT), write
     echo -e "o\nn\np\n1\n\n\nt\n7\nw" | fdisk "$USB_DEV" || true
     sleep 1
     PART="${USB_DEV}1"
@@ -188,6 +189,7 @@ format_usb_stick() {
     mkfs.exfat -n PI2CACHE "$PART"
 
     sleep 1
+    # Re-check partition path after kernel re-reads table
     [[ -b "${USB_DEV}1" ]] && PART="${USB_DEV}1" || PART="$USB_DEV"
     USB_UUID=$(blkid -s UUID -o value "$PART")
 
@@ -354,7 +356,7 @@ if [[ -n "$BOOT_CFG" ]]; then
         info "Enabled vc4-kms-v3d overlay"
     fi
     # Disable screen blanking via DPMS
-    if ! grep -q "^hdmi_blanking=1" "$BOOT_CFG"; then
+    if ! grep -q "^hdmi_blanking=" "$BOOT_CFG"; then
         echo "# Prevent HDMI/DSI blanking for always-on display" >> "$BOOT_CFG"
         echo "hdmi_blanking=0" >> "$BOOT_CFG"
     fi
