@@ -20,7 +20,7 @@ import functools
 import logging
 import re
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from flask import (
@@ -684,7 +684,9 @@ def get_backup_status(last_backup: str) -> dict:
         last_backup_dt = datetime.fromisoformat(last_backup)
     except Exception:
         return build_status("warning", "Unknown", f'Backup timestamp "{last_backup}" could not be parsed.')
-    backup_age = datetime.now() - last_backup_dt
+    if last_backup_dt.tzinfo is None:
+        last_backup_dt = last_backup_dt.replace(tzinfo=timezone.utc)
+    backup_age = datetime.now(timezone.utc) - last_backup_dt
     if backup_age > timedelta(hours=26):
         return build_status("warning", "Stale", f"Last successful backup was {last_backup_dt.isoformat(timespec='minutes')}.")
     return build_status("ok", "Healthy", f"Last successful backup finished {last_backup_dt.isoformat(timespec='minutes')}.")
