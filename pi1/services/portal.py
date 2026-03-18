@@ -364,8 +364,8 @@ def get_pi2_api_candidates() -> list:
 
 
 def _resolve_host_prefer_ipv4(host: str, port: int) -> list:
-    """Resolve *host* via getaddrinfo, returning (addr, port) pairs with
-    IPv4 addresses listed first.  On Raspberry Pi OS Bookworm, Avahi/mDNS
+    """Resolve *host* via getaddrinfo, returning (addr, port, is_ipv6) tuples
+    with IPv4 addresses listed first.  On Raspberry Pi OS Bookworm, Avahi/mDNS
     may return an IPv6 link-local address for ``pi2-display.local``; placing
     IPv4 first avoids 'connection refused' when the remote Flask server is
     only listening on IPv4 (older setups) while still working when the
@@ -384,9 +384,9 @@ def _resolve_host_prefer_ipv4(host: str, port: int) -> list:
             continue
         seen.add(addr)
         if family == socket.AF_INET:
-            ipv4.append((addr, port))
+            ipv4.append((addr, port, False))
         elif family == socket.AF_INET6:
-            ipv6.append((addr, port))
+            ipv6.append((addr, port, True))
     return ipv4 + ipv6
 
 
@@ -395,6 +395,7 @@ def proxy_pi2_request(path: str, method: str = "GET", payload: dict = None):
     headers = {"Content-Type": "application/json"} if payload is not None else {}
     last_error = "Pi 2 is unreachable."
     tried_hosts = []
+    tried_addrs = []
     for host in get_pi2_api_candidates():
         tried_hosts.append(host)
         # Resolve the hostname ourselves so we can try IPv4 first (the
@@ -403,10 +404,11 @@ def proxy_pi2_request(path: str, method: str = "GET", payload: dict = None):
         # the URL.
         resolved_targets = _resolve_host_prefer_ipv4(host, PI2_API_PORT)
         if not resolved_targets:
-            resolved_targets = [(host, PI2_API_PORT)]
-        for addr, port in resolved_targets:
+            resolved_targets = [(host, PI2_API_PORT, False)]
+        for addr, port, is_ipv6 in resolved_targets:
+            tried_addrs.append(addr)
             # Wrap raw IPv6 addresses in brackets for HTTP URLs
-            url_host = f"[{addr}]" if ":" in addr else addr
+            url_host = f"[{addr}]" if is_ipv6 else addr
             url = f"http://{url_host}:{port}{path}"
             try:
                 request_obj = urllib.request.Request(url, data=body, headers=headers, method=method)
@@ -427,7 +429,7 @@ def proxy_pi2_request(path: str, method: str = "GET", payload: dict = None):
                     last_error = str(exc)
             except Exception as exc:
                 last_error = str(exc)
-    log.debug("proxy_pi2_request failed for %s — tried %s — %s", path, tried_hosts, last_error)
+    log.debug("proxy_pi2_request failed for %s — hosts %s, addrs %s — %s", path, tried_hosts, tried_addrs, last_error)
     return {"error": last_error, "tried_hosts": tried_hosts}, 502
 
 

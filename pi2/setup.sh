@@ -399,7 +399,7 @@ if command -v nft &>/dev/null; then
         nft add table inet timelapse
     nft list chain inet timelapse input &>/dev/null 2>&1 || \
         nft add chain inet timelapse input '{ type filter hook input priority 0; policy accept; }'
-    # Remove old rule if present, then re-add (idempotent)
+    # Add an accept rule for port 5000 if not already present (idempotent)
     nft --handle list chain inet timelapse input 2>/dev/null \
         | grep -q "tcp dport 5000" \
         || nft add rule inet timelapse input iifname "wlan0" tcp dport 5000 accept
