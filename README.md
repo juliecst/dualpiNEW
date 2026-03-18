@@ -128,6 +128,41 @@ sudo systemctl start sync.service playback.service status_api.service
 
 This makes Pi 2 reconnect to Pi 1 automatically, resync images, relaunch playback, and restore the status API on every boot.
 
+### Updating the Software
+
+Each Pi has an `update.sh` script that pulls the latest code from the git remote, re-deploys services, and restarts them. The script also fixes `.git` directory permissions so that subsequent `git pull` commands work for both root and the normal `pi` user.
+
+> **Prerequisite:** The repository must have been cloned with `git clone` (not just copied via `scp`). If the code was originally copied with `scp`, convert to a git clone first:
+> ```bash
+> cd ~
+> rm -rf pi1   # or pi2
+> git clone https://github.com/strhwste/dualpi.git
+> ```
+
+#### Update Pi 1
+
+```bash
+ssh pi@192.168.50.1
+cd ~/dualpi    # or wherever the repo was cloned
+sudo bash pi1/update.sh
+```
+
+#### Update Pi 2
+
+```bash
+ssh pi@192.168.50.20
+cd ~/dualpi    # or wherever the repo was cloned
+sudo bash pi2/update.sh
+```
+
+The update scripts:
+1. Fix `.git` directory ownership (resolves "Permission denied" errors from running `setup.sh` as root)
+2. Run `git pull --ff-only` to fetch the latest changes
+3. Copy updated Python scripts, shell scripts, and systemd units to their system locations
+4. Reload systemd and restart all affected services
+
+> **Note:** Pi 1 needs internet access to reach the git remote. Either connect via Ethernet or switch Pi 1 to Wi-Fi client mode using the `uplink_wifi_ssid` setting in the admin portal before running the update.
+
 ---
 
 ## SSH Access Via the AP Network
@@ -476,6 +511,7 @@ ls /mnt/timelapse/current/
 ```
 pi1/
   setup.sh              ← Full Pi 1 setup (run as root)
+  update.sh             ← Pull & re-deploy Pi 1 services (run as root)
   hostapd.conf          ← WiFi AP config
   dnsmasq.conf          ← DHCP/DNS config
   smb.conf              ← Samba shares config (guest auth, no passwords)
@@ -491,6 +527,7 @@ pi1/
 
 pi2/
   setup.sh              ← Full Pi 2 setup (run as root; USB format + Waveshare display config)
+  update.sh             ← Pull & re-deploy Pi 2 services (run as root)
   fstab_entries.txt     ← Reference fstab lines (USB, Samba, tmpfs)
   services/
     sync.py             ← Image sync service (with Samba connectivity checks)
