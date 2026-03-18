@@ -53,6 +53,7 @@ def remote_available() -> bool:
     if os.path.isfile(REMOTE_SESSION):
         return True
 
+    # Try mounting (handles automount and fstab-based mounts)
     try:
         result = subprocess.run(
             ["mount", REMOTE_MOUNT],
@@ -66,6 +67,24 @@ def remote_available() -> bool:
             log.warning("Mount retry returned %d: %s", result.returncode, result.stderr.strip())
     except Exception as e:
         log.warning("Mount retry failed: %s", e)
+
+    if os.path.isfile(REMOTE_SESSION):
+        return True
+
+    # Fall back: verify Pi 1 is reachable and Samba share exists
+    try:
+        result = subprocess.run(
+            ["smbclient", "-N", "-L", "//192.168.50.1", "--timeout=5"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        if result.returncode == 0 and "timelapse" in result.stdout.lower():
+            log.info("Pi 1 Samba share found — share may not have session.id yet")
+        else:
+            log.debug("smbclient probe: rc=%d", result.returncode)
+    except Exception:
+        pass
 
     return os.path.isfile(REMOTE_SESSION)
 

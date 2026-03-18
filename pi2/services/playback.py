@@ -8,6 +8,9 @@ Plays timelapse frames on the Waveshare round display using mpv.
 - FPS > 30: renders to .mp4 with ffmpeg (deflicker) and plays the video
 Polls config.json every 30 seconds for changes.
 Uses mpv IPC socket for playlist reload and playback control.
+
+On cold boot, starts as soon as the first frame appears in /data/cache/.
+Supports both HDMI and DRM/KMS (Waveshare round SPI) displays.
 """
 import json
 import glob
@@ -110,6 +113,58 @@ def kill_mpv():
     time.sleep(1)
 
 
+def detect_drm_connector() -> str:
+    """Auto-detect the active DRM connector for the Waveshare round display.
+
+    Scans /sys/class/drm/ for connected outputs and returns the connector
+    name suitable for mpv's --drm-connector option.  Falls back to an
+    empty string (let mpv pick) if nothing is detected.
+    """
+    drm_base = "/sys/class/drm"
+    if not os.path.isdir(drm_base):
+        return ""
+    connectors = []
+    try:
+        for entry in sorted(os.listdir(drm_base)):
+            status_path = os.path.join(drm_base, entry, "status")
+            if not os.path.isfile(status_path):
+                continue
+            with open(status_path) as f:
+                status = f.read().strip()
+            if status == "connected":
+                # entry looks like "card0-DSI-1" or "card1-HDMI-A-1"
+                # mpv wants the part after "cardN-"
+                parts = entry.split("-", 1)
+                if len(parts) == 2:
+                    connectors.append(parts[1])
+    except Exception as e:
+        log.debug("DRM connector detection error: %s", e)
+    # Prefer DSI/DPI connectors (typical for Waveshare round), then any
+    for conn in connectors:
+        if conn.startswith("DSI") or conn.startswith("DPI"):
+            log.info("Auto-detected DRM connector: %s", conn)
+            return conn
+    if connectors:
+        log.info("Auto-detected DRM connector (first available): %s", connectors[0])
+        return connectors[0]
+    return ""
+
+
+def build_mpv_display_args(display_type: str) -> list:
+    """Return mpv arguments for the configured display type."""
+    if display_type == "spi":
+        args = ["--vo=drm"]
+        connector = detect_drm_connector()
+        if connector:
+            args.append(f"--drm-connector={connector}")
+        return args
+
+    # HDMI (default)
+    if os.path.exists("/dev/dri/card0"):
+        return ["--fullscreen", "--no-border", "--gpu-context=drm"]
+    return ["--fullscreen", "--no-border", "--vo=gpu"]
+
+
 def start_mpv_slideshow(fps: int, display_type: str):
     """Start mpv in slideshow mode for FPS ≤ 30."""
     if fps <= 0:
@@ -129,15 +184,7 @@ def start_mpv_slideshow(fps: int, display_type: str):
         "--title=timelapse-playback",
     ]
 
-    # Display-specific options
-    if display_type == "spi":
-        cmd += ["--vo=drm", "--drm-connector=0"]
-    else:
-        cmd += [
-            "--fullscreen",
-            "--no-border",
-            "--gpu-context=drm" if os.path.exists("/dev/dri/card0") else "--vo=gpu",
-        ]
+    cmd += build_mpv_display_args(display_type)
 
     log.info("Starting mpv slideshow (FPS=%d, duration=%.4fs)", fps, duration)
     proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -158,14 +205,7 @@ def start_mpv_video(video_path: str, display_type: str):
         "--title=timelapse-playback",
     ]
 
-    if display_type == "spi":
-        cmd += ["--vo=drm", "--drm-connector=0"]
-    else:
-        cmd += [
-            "--fullscreen",
-            "--no-border",
-            "--gpu-context=drm" if os.path.exists("/dev/dri/card0") else "--vo=gpu",
-        ]
+    cmd += build_mpv_display_args(display_type)
 
     log.info("Starting mpv video: %s", video_path)
     proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -221,10 +261,30 @@ def render_preview(fps: int) -> str:
             os.remove(RENDERING_FLAG)
 
 
+def wait_for_frames():
+    """Block until at least one frame appears in cache.
+
+    Logs progress every 30 seconds so the journal shows the service is
+    alive and waiting rather than silently idle.
+    """
+    log.info("Waiting for frames in %s …", LOCAL_CACHE)
+    waited = 0
+    while True:
+        if get_sorted_frames():
+            return
+        if waited % 30 == 0 and waited > 0:
+            log.info("Still waiting for first frame (%ds elapsed)…", waited)
+        time.sleep(5)
+        waited += 5
+
+
 def main():
     log.info("Playback service starting…")
     os.makedirs(LOCAL_CACHE, exist_ok=True)
     os.makedirs(RENDERS_DIR, exist_ok=True)
+
+    # On cold boot, block until sync has delivered at least one frame
+    wait_for_frames()
 
     cfg = read_config()
     current_fps = cfg["playback_fps"]
