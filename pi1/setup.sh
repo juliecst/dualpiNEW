@@ -43,9 +43,57 @@ apt-get install -y \
   ffmpeg jq
 
 ###############################################################################
-# 2. Format and mount USB sticks
+# 2. Set up USB sticks (detect existing pictures, preserve or format)
 ###############################################################################
-format_usb_sticks() {
+
+# Count picture/video files on a USB partition.
+# Prints count to stdout. Temporarily mounts read-only, then unmounts.
+_count_pictures() {
+    local part="$1"
+    # Bail out if the partition has no recognisable filesystem
+    if ! blkid -s TYPE -o value "$part" &>/dev/null; then echo "0"; return; fi
+
+    # Unmount if auto-mounted
+    umount "$part" 2>/dev/null || true
+
+    local tmp_mnt count=0
+    tmp_mnt=$(mktemp -d)
+    if mount -o ro "$part" "$tmp_mnt" 2>/dev/null; then
+        count=$(find "$tmp_mnt" -maxdepth 5 \
+            \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" \
+               -o -iname "*.dng" -o -iname "*.tiff" -o -iname "*.mp4" \) \
+            2>/dev/null | wc -l)
+        umount "$tmp_mnt" 2>/dev/null || true
+    fi
+    rmdir "$tmp_mnt" 2>/dev/null || true
+    echo "$count"
+}
+
+# Return fstab mount options appropriate for a given filesystem type.
+_fstab_mount_opts() {
+    local fs_type="$1"
+    case "$fs_type" in
+        exfat|vfat|ntfs|ntfs-3g)
+            echo "defaults,nofail,uid=1000,gid=1000,dmask=0022,fmask=0133" ;;
+        *)
+            echo "defaults,nofail" ;;
+    esac
+}
+
+# Format a single block device as exFAT. Device must be unmounted first.
+_format_device_exfat() {
+    local dev="$1" label="$2"
+    info "Formatting $dev as exFAT…"
+    wipefs -a "$dev"
+    echo -e "o\nn\np\n1\n\n\nt\n7\nw" | fdisk "$dev" || true
+    sleep 1
+    local part="${dev}1"
+    [[ -b "$part" ]] || part="$dev"
+    mkfs.exfat -n "$label" "$part"
+    sleep 1
+}
+
+setup_usb_sticks() {
     info "Detecting USB block devices…"
 
     # Find USB mass-storage block devices (exclude SD card / loop / ram)
@@ -73,48 +121,85 @@ format_usb_sticks() {
     info "Working stick: $WORKING_DEV"
     info "Backup  stick: $BACKUP_DEV"
 
-    read -rp "Format BOTH sticks as exFAT? ALL DATA WILL BE LOST. [y/N] " yn
-    [[ "$yn" =~ ^[Yy]$ ]] || { warn "Skipping format."; return 1; }
+    WORKING_UUID=""
+    BACKUP_UUID=""
+    WORKING_FSTYPE="exfat"
+    BACKUP_FSTYPE="exfat"
 
-    for dev in "$WORKING_DEV" "$BACKUP_DEV"; do
-        info "Formatting $dev as exFAT…"
-        wipefs -a "$dev"
-        # Create a single partition
-        echo -e "o\nn\np\n1\n\n\nt\n7\nw" | fdisk "$dev" || true
-        sleep 1
-        PART="${dev}1"
-        [[ -b "$PART" ]] || PART="$dev"   # handle whole-disk devices
-        mkfs.exfat -n TIMELAPSE "$PART"
+    # ── Process each stick: preserve existing pictures or format ─────
+    local dev part img_count fs_type uuid stick_name yn preserve_yn
+    for stick_name in working backup; do
+        if [[ "$stick_name" == "working" ]]; then
+            dev="$WORKING_DEV"
+        else
+            dev="$BACKUP_DEV"
+        fi
+
+        # Find existing partition
+        part="${dev}1"
+        [[ -b "$part" ]] || part="$dev"
+
+        # Check for existing pictures / videos
+        img_count=$(_count_pictures "$part")
+
+        if [[ "$img_count" -gt 0 ]]; then
+            fs_type=$(blkid -s TYPE -o value "$part" 2>/dev/null || echo "unknown")
+            info "Found $img_count picture/video file(s) on $dev ($fs_type filesystem)."
+            read -rp "Keep existing data on $dev ($stick_name stick)? [Y/n] " preserve_yn
+            if [[ ! "$preserve_yn" =~ ^[Nn]$ ]]; then
+                info "Preserving existing data on $dev."
+                uuid=$(blkid -s UUID -o value "$part")
+                if [[ "$stick_name" == "working" ]]; then
+                    WORKING_UUID="$uuid"; WORKING_FSTYPE="$fs_type"
+                else
+                    BACKUP_UUID="$uuid"; BACKUP_FSTYPE="$fs_type"
+                fi
+                continue
+            fi
+        fi
+
+        # No pictures found, or user chose not to preserve — offer to format
+        read -rp "Format $dev ($stick_name stick) as exFAT? ALL DATA WILL BE LOST. [y/N] " yn
+        [[ "$yn" =~ ^[Yy]$ ]] || { warn "Skipping format for $dev."; continue; }
+
+        # Unmount all partitions of the device before formatting
+        umount "${dev}"* 2>/dev/null || true
+        sleep 0.5
+
+        _format_device_exfat "$dev" "TIMELAPSE"
+
+        [[ -b "${dev}1" ]] && part="${dev}1" || part="$dev"
+        uuid=$(blkid -s UUID -o value "$part")
+        if [[ "$stick_name" == "working" ]]; then
+            WORKING_UUID="$uuid"; WORKING_FSTYPE="exfat"
+        else
+            BACKUP_UUID="$uuid"; BACKUP_FSTYPE="exfat"
+        fi
     done
 
-    # Get UUIDs
-    sleep 1
-    WORKING_PART="${WORKING_DEV}1"; [[ -b "$WORKING_PART" ]] || WORKING_PART="$WORKING_DEV"
-    BACKUP_PART="${BACKUP_DEV}1";   [[ -b "$BACKUP_PART" ]]  || BACKUP_PART="$BACKUP_DEV"
-
-    WORKING_UUID=$(blkid -s UUID -o value "$WORKING_PART")
-    BACKUP_UUID=$(blkid -s UUID -o value "$BACKUP_PART")
-
-    info "Working UUID: $WORKING_UUID"
-    info "Backup  UUID: $BACKUP_UUID"
+    # ── Set up fstab entries ────────────────────────────────────────
+    [[ -n "$WORKING_UUID" ]] && info "Working UUID: $WORKING_UUID" || warn "Working stick UUID not set — configure manually."
+    [[ -n "$BACKUP_UUID" ]]  && info "Backup  UUID: $BACKUP_UUID"  || warn "Backup stick UUID not set — configure manually."
 
     # Remove old entries
     sed -i '\|/data |d; \|/backup |d' /etc/fstab
 
-    # Append new entries
-    cat >> /etc/fstab <<EOF
-UUID=${WORKING_UUID}  /data    exfat  defaults,nofail,uid=1000,gid=1000,dmask=0022,fmask=0133  0  0
-UUID=${BACKUP_UUID}   /backup  exfat  defaults,nofail,uid=1000,gid=1000,dmask=0022,fmask=0133  0  0
-EOF
+    # Append new entries (mount options vary by filesystem type)
+    if [[ -n "$WORKING_UUID" ]]; then
+        echo "UUID=${WORKING_UUID}  /data    ${WORKING_FSTYPE}  $(_fstab_mount_opts "$WORKING_FSTYPE")  0  0" >> /etc/fstab
+    fi
+    if [[ -n "$BACKUP_UUID" ]]; then
+        echo "UUID=${BACKUP_UUID}   /backup  ${BACKUP_FSTYPE}  $(_fstab_mount_opts "$BACKUP_FSTYPE")  0  0" >> /etc/fstab
+    fi
 
     mkdir -p /data /backup
     mount -a
     info "USB sticks mounted."
 }
 
-# Only format if /data is not already a USB mount
+# Only set up if /data is not already a USB mount
 if ! mountpoint -q /data 2>/dev/null; then
-    format_usb_sticks || warn "USB setup incomplete — configure /etc/fstab manually."
+    setup_usb_sticks || warn "USB setup incomplete — configure /etc/fstab manually."
 fi
 
 ###############################################################################
