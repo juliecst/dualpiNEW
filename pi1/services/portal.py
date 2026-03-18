@@ -217,6 +217,48 @@ def is_service_active(name: str) -> bool:
         return False
 
 
+def get_systemd_service_state(name: str) -> dict:
+    """Return systemd ActiveState and SubState for a service unit."""
+    try:
+        result = run_command(
+            ["systemctl", "show", name, "--property=ActiveState,SubState,NRestarts"],
+            timeout=5,
+        )
+        props = {}
+        for line in result.stdout.strip().splitlines():
+            if "=" in line:
+                k, v = line.split("=", 1)
+                props[k] = v
+        return props
+    except Exception:
+        return {"ActiveState": "unknown", "SubState": "unknown"}
+
+
+def get_pi1_service_statuses() -> dict:
+    """Check health of Pi 1 systemd services."""
+    services = {}
+    for name in ["capture.service", "portal.service"]:
+        svc = get_systemd_service_state(name)
+        active = svc.get("ActiveState", "unknown")
+        sub = svc.get("SubState", "unknown")
+        restarts = svc.get("NRestarts", "0")
+        if active == "active":
+            state = "ok"
+            message = f"Running ({sub})"
+        elif active in ("activating", "reloading"):
+            state = "warning"
+            message = f"Starting ({sub})"
+        else:
+            state = "error"
+            message = f"Not running ({active}/{sub})"
+        services[name.replace(".service", "")] = {
+            "state": state,
+            "message": message,
+            "restarts": restarts,
+        }
+    return services
+
+
 def get_pi1_network_mode() -> str:
     if is_service_active("hostapd"):
         return "ap"
@@ -1323,6 +1365,7 @@ def pi1_status():
             "backup_warning": os.path.isfile(BACKUP_WARNING),
             "disk_warning": os.path.isfile(DISK_WARNING),
             "session_id": get_session_id(),
+            "services": get_pi1_service_statuses(),
         })
     except Exception:
         log.exception("Pi 1 status poll failed")
@@ -1853,6 +1896,10 @@ font-size:.65rem;color:#fff;position:relative;transition:height .3s}
     <span class="badge {{ backup_status.badge_class }}">Backup {{ backup_status.label }}</span>
     <span class="badge {{ disk_status.badge_class }}">Storage {{ disk_status.label }}</span>
   </div>
+  <div class="status-summary" id="p1-services">
+    <span class="badge badge-off" id="p1-svc-capture">Capture –</span>
+    <span class="badge badge-off" id="p1-svc-portal">Portal –</span>
+  </div>
   <div class="stat-row">
     <div class="stat-box">
       <div class="stat" id="p1-disk-data">{{ disk_data.used_gb }}/{{ disk_data.total_gb }} GB</div>
@@ -1880,6 +1927,11 @@ font-size:.65rem;color:#fff;position:relative;transition:height .3s}
       <div class="stat-box"><div class="stat" id="p2-frame">–</div><div class="stat-label">Current / Total Frames</div></div>
       <div class="stat-box"><div class="stat" id="p2-state">–</div><div class="stat-label">Playback State</div></div>
       <div class="stat-box"><div class="stat" id="p2-fps">–</div><div class="stat-label">FPS</div></div>
+    </div>
+    <div class="status-summary" id="p2-services">
+      <span class="badge badge-off" id="p2-svc-sync">Sync –</span>
+      <span class="badge badge-off" id="p2-svc-playback">Playback –</span>
+      <span class="badge badge-off" id="p2-svc-status_api">API –</span>
     </div>
     <div class="stat-row">
       <div class="stat-box"><div class="stat" id="p2-uptime">–</div><div class="stat-label">Uptime</div></div>
@@ -1918,6 +1970,26 @@ function refreshThumbnail(hasFrames){
 
 function parsePi2Response(response){
   return response.json().catch(()=>({})).then(data=>({ok:response.ok,data:data}));
+}
+
+function svcBadgeClass(state){
+  if(state==='ok') return 'badge-ok';
+  if(state==='warning') return 'badge-warn';
+  if(state==='error') return 'badge-err';
+  return 'badge-off';
+}
+
+function updateServiceBadge(id, name, svc){
+  var el=document.getElementById(id);
+  if(!el||!svc) return;
+  el.className='badge '+svcBadgeClass(svc.state);
+  var label=name;
+  if(svc.state==='ok') label+=' ✓';
+  else if(svc.state==='error') label+=' ✗';
+  else if(svc.state==='warning') label+=' ⚠';
+  if(svc.restarts && parseInt(svc.restarts,10)>0) label+=' ('+svc.restarts+'×)';
+  el.textContent=label;
+  el.title=svc.message||'';
 }
 
 function runPi2Action(path, successMessage){
@@ -1999,6 +2071,11 @@ function pollPi2(){
       var pi2WifiText=d.wifi_message||'–';
       if(d.pi2_host){pi2WifiText+=' via '+d.pi2_host}
       document.getElementById('p2-wifi').textContent=pi2WifiText;
+      if(d.services){
+        updateServiceBadge('p2-svc-sync','Sync',d.services.sync);
+        updateServiceBadge('p2-svc-playback','Playback',d.services.playback);
+        updateServiceBadge('p2-svc-status_api','API',d.services.status_api);
+      }
     })
     .catch(()=>{
       clearTimeout(tid);
@@ -2024,6 +2101,10 @@ function pollPi1(){
     document.getElementById('session-last-capture').textContent=d.last_capture||'–';
     document.getElementById('session-duration').textContent=(fps>0?((d.frames||0)/fps).toFixed(1):'0.0')+'s';
     refreshThumbnail((d.frames||0)>0);
+    if(d.services){
+      updateServiceBadge('p1-svc-capture','Capture',d.services.capture);
+      updateServiceBadge('p1-svc-portal','Portal',d.services.portal);
+    }
   }).catch(()=>{});
 }
 
