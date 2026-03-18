@@ -40,7 +40,8 @@ apt-get update -qq
 apt-get install -y \
   cifs-utils samba-client rsync ffmpeg mpv \
   python3-flask python3-pip \
-  chrony fake-hwclock jq exfatprogs
+  chrony fake-hwclock jq exfatprogs \
+  avahi-daemon
 
 ###############################################################################
 # 2. Configure WiFi client
@@ -127,6 +128,33 @@ done
 SCRIPT
 chmod +x /opt/wifi_retry.sh
 systemctl enable wifi-retry.service
+
+###############################################################################
+# 2b. Configure Avahi/mDNS for auto-discovery
+###############################################################################
+info "Configuring Avahi mDNS (hostname: pi2-display.local)…"
+hostnamectl set-hostname pi2-display 2>/dev/null || true
+cat > /etc/avahi/avahi-daemon.conf <<'EOF'
+[server]
+host-name=pi2-display
+domain-name=local
+use-ipv4=yes
+use-ipv6=no
+allow-interfaces=wlan0
+
+[publish]
+publish-addresses=yes
+publish-hinfo=no
+publish-workstation=no
+
+[wide-area]
+enable-wide-area=no
+
+[reflector]
+enable-reflector=no
+EOF
+systemctl enable avahi-daemon
+systemctl restart avahi-daemon 2>/dev/null || true
 
 ###############################################################################
 # 3. Configure chrony NTP client
