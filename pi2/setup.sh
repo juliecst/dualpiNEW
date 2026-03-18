@@ -386,6 +386,38 @@ crontab "$CRON_TMP"
 rm -f "$CRON_TMP"
 
 ###############################################################################
+# 8b. Firewall — ensure status-api port 5000 is reachable from Pi 1
+###############################################################################
+info "Configuring firewall to allow status-api port 5000…"
+
+# Bookworm defaults to nftables; older images may still use iptables.
+# We open TCP port 5000 inbound on wlan0 so Pi 1's portal can reach the
+# status-api.  Rules are idempotent — safe to run multiple times.
+if command -v nft &>/dev/null; then
+    # Create an inet table + chain if not yet present, then add an accept rule.
+    nft list table inet timelapse &>/dev/null 2>&1 || \
+        nft add table inet timelapse
+    nft list chain inet timelapse input &>/dev/null 2>&1 || \
+        nft add chain inet timelapse input '{ type filter hook input priority 0; policy accept; }'
+    # Add an accept rule for port 5000 if not already present (idempotent)
+    nft --handle list chain inet timelapse input 2>/dev/null \
+        | grep -q "tcp dport 5000" \
+        || nft add rule inet timelapse input iifname "wlan0" tcp dport 5000 accept
+    info "nftables: port 5000 open on wlan0"
+fi
+
+if command -v iptables &>/dev/null; then
+    iptables -C INPUT -i wlan0 -p tcp --dport 5000 -j ACCEPT 2>/dev/null || \
+        iptables -I INPUT -i wlan0 -p tcp --dport 5000 -j ACCEPT
+    # Also allow on all interfaces in case Pi 2 is reached via eth0
+    iptables -C INPUT -p tcp --dport 5000 -j ACCEPT 2>/dev/null || \
+        iptables -I INPUT -p tcp --dport 5000 -j ACCEPT
+    mkdir -p /etc/iptables
+    iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
+    info "iptables: port 5000 open"
+fi
+
+###############################################################################
 # 9. Stability hardening
 ###############################################################################
 info "Applying stability hardening…"
