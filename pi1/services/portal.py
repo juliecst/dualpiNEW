@@ -1987,7 +1987,7 @@ function updateServiceBadge(id, name, svc){
   if(svc.state==='ok') label+=' ✓';
   else if(svc.state==='error') label+=' ✗';
   else if(svc.state==='warning') label+=' ⚠';
-  if(svc.restarts && parseInt(svc.restarts)>0) label+=' ('+svc.restarts+'×)';
+  if(svc.restarts && parseInt(svc.restarts,10)>0) label+=' ('+svc.restarts+'×)';
   el.textContent=label;
   el.title=svc.message||'';
 }

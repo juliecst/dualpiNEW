@@ -63,11 +63,12 @@ def _check_path_exists(path: str, result: list):
     """Target for threaded file check — avoids blocking on stale CIFS mounts."""
     try:
         result.append(os.path.isfile(path))
-    except Exception:
+    except OSError as e:
+        log.debug("Path check for %s raised %s", path, e)
         result.append(False)
 
 
-def safe_path_exists(path: str, timeout: float = MOUNT_CHECK_TIMEOUT) -> bool:
+def safe_file_exists(path: str, timeout: float = MOUNT_CHECK_TIMEOUT) -> bool:
     """Check if a file exists with a timeout to handle stale/hung mounts."""
     result = []
     t = threading.Thread(target=_check_path_exists, args=(path, result), daemon=True)
@@ -107,15 +108,20 @@ def recover_stale_mount():
 
 def remote_available() -> bool:
     """Ensure the Samba mount is available, even after cold boots/outages."""
-    if safe_path_exists(REMOTE_SESSION):
+    if safe_file_exists(REMOTE_SESSION):
         return True
 
     # Check if mount point itself is hung (stale CIFS)
-    result = []
-    t = threading.Thread(
-        target=lambda: result.append(os.path.ismount(REMOTE_MOUNT)),
-        daemon=True,
-    )
+    mount_result = []
+
+    def _check_ismount():
+        try:
+            mount_result.append(os.path.ismount(REMOTE_MOUNT))
+        except OSError as e:
+            log.debug("ismount check for %s raised %s", REMOTE_MOUNT, e)
+            mount_result.append(False)
+
+    t = threading.Thread(target=_check_ismount, daemon=True)
     t.start()
     t.join(MOUNT_CHECK_TIMEOUT)
     mount_hung = t.is_alive()
@@ -123,7 +129,7 @@ def remote_available() -> bool:
     if mount_hung:
         log.warning("Mount point %s appears stale/hung — recovering", REMOTE_MOUNT)
         recover_stale_mount()
-        if safe_path_exists(REMOTE_SESSION):
+        if safe_file_exists(REMOTE_SESSION):
             return True
         return False
 
@@ -142,7 +148,7 @@ def remote_available() -> bool:
     except Exception as e:
         log.warning("Mount retry failed: %s", e)
 
-    if safe_path_exists(REMOTE_SESSION):
+    if safe_file_exists(REMOTE_SESSION):
         return True
 
     # Fall back: verify Pi 1 is reachable and Samba share exists
@@ -160,7 +166,7 @@ def remote_available() -> bool:
     except Exception:
         pass
 
-    return safe_path_exists(REMOTE_SESSION)
+    return safe_file_exists(REMOTE_SESSION)
 
 
 def get_remote_session() -> str:

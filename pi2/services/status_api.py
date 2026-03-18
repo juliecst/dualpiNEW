@@ -15,6 +15,7 @@ import time
 import threading
 import logging
 import sys
+from datetime import datetime
 
 from flask import Flask, jsonify, request
 
@@ -225,7 +226,6 @@ def get_sync_health() -> dict:
     try:
         with open(SYNC_HEARTBEAT_FILE) as f:
             ts = f.read().strip()
-        from datetime import datetime
         beat_dt = datetime.fromisoformat(ts)
         heartbeat_age = (datetime.now() - beat_dt).total_seconds()
         heartbeat_ok = heartbeat_age < SYNC_HEARTBEAT_MAX_AGE
