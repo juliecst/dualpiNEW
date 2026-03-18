@@ -50,9 +50,8 @@ apt-get install -y \
 # Prints count to stdout. Temporarily mounts read-only, then unmounts.
 _count_pictures() {
     local part="$1"
-    local fs_type
-    fs_type=$(blkid -s TYPE -o value "$part" 2>/dev/null || echo "")
-    if [[ -z "$fs_type" ]]; then echo "0"; return; fi
+    # Bail out if the partition has no recognisable filesystem
+    if ! blkid -s TYPE -o value "$part" &>/dev/null; then echo "0"; return; fi
 
     # Unmount if auto-mounted
     umount "$part" 2>/dev/null || true
@@ -68,6 +67,17 @@ _count_pictures() {
     fi
     rmdir "$tmp_mnt" 2>/dev/null || true
     echo "$count"
+}
+
+# Return fstab mount options appropriate for a given filesystem type.
+_fstab_mount_opts() {
+    local fs_type="$1"
+    case "$fs_type" in
+        exfat|vfat|ntfs|ntfs-3g)
+            echo "defaults,nofail,uid=1000,gid=1000,dmask=0022,fmask=0133" ;;
+        *)
+            echo "defaults,nofail" ;;
+    esac
 }
 
 # Format a single block device as exFAT. Device must be unmounted first.
@@ -174,12 +184,12 @@ setup_usb_sticks() {
     # Remove old entries
     sed -i '\|/data |d; \|/backup |d' /etc/fstab
 
-    # Append new entries (use detected fs type for preserved sticks)
+    # Append new entries (mount options vary by filesystem type)
     if [[ -n "$WORKING_UUID" ]]; then
-        echo "UUID=${WORKING_UUID}  /data    ${WORKING_FSTYPE}  defaults,nofail,uid=1000,gid=1000,dmask=0022,fmask=0133  0  0" >> /etc/fstab
+        echo "UUID=${WORKING_UUID}  /data    ${WORKING_FSTYPE}  $(_fstab_mount_opts "$WORKING_FSTYPE")  0  0" >> /etc/fstab
     fi
     if [[ -n "$BACKUP_UUID" ]]; then
-        echo "UUID=${BACKUP_UUID}   /backup  ${BACKUP_FSTYPE}  defaults,nofail,uid=1000,gid=1000,dmask=0022,fmask=0133  0  0" >> /etc/fstab
+        echo "UUID=${BACKUP_UUID}   /backup  ${BACKUP_FSTYPE}  $(_fstab_mount_opts "$BACKUP_FSTYPE")  0  0" >> /etc/fstab
     fi
 
     mkdir -p /data /backup

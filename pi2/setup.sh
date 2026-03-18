@@ -186,9 +186,8 @@ systemctl enable chrony
 # Prints count to stdout. Temporarily mounts read-only, then unmounts.
 _count_pictures() {
     local part="$1"
-    local fs_type
-    fs_type=$(blkid -s TYPE -o value "$part" 2>/dev/null || echo "")
-    if [[ -z "$fs_type" ]]; then echo "0"; return; fi
+    # Bail out if the partition has no recognisable filesystem
+    if ! blkid -s TYPE -o value "$part" &>/dev/null; then echo "0"; return; fi
 
     # Unmount if auto-mounted
     umount "$part" 2>/dev/null || true
@@ -204,6 +203,17 @@ _count_pictures() {
     fi
     rmdir "$tmp_mnt" 2>/dev/null || true
     echo "$count"
+}
+
+# Return fstab mount options appropriate for a given filesystem type.
+_fstab_mount_opts() {
+    local fs_type="$1"
+    case "$fs_type" in
+        exfat|vfat|ntfs|ntfs-3g)
+            echo "defaults,nofail,uid=1000,gid=1000,dmask=0022,fmask=0133" ;;
+        *)
+            echo "defaults,nofail" ;;
+    esac
 }
 
 # Format a single block device as exFAT. Device must be unmounted first.
@@ -259,7 +269,7 @@ setup_usb_stick() {
             info "USB UUID: $uuid"
 
             sed -i '\|/data |d' /etc/fstab
-            echo "UUID=${uuid}  /data  ${fs_type}  defaults,nofail,uid=1000,gid=1000,dmask=0022,fmask=0133  0  0" >> /etc/fstab
+            echo "UUID=${uuid}  /data  ${fs_type}  $(_fstab_mount_opts "$fs_type")  0  0" >> /etc/fstab
 
             mkdir -p /data
             mount -a
