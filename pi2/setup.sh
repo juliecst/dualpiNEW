@@ -40,7 +40,7 @@ apt-get update -qq
 apt-get install -y \
   cifs-utils samba-client rsync ffmpeg mpv \
   python3-flask python3-pip \
-  chrony fake-hwclock jq
+  chrony fake-hwclock jq exfatprogs
 
 ###############################################################################
 # 2. Configure WiFi client
@@ -151,7 +151,67 @@ EOF
 systemctl enable chrony
 
 ###############################################################################
-# 4. Create local data directories
+# 4. Detect and format USB stick (optional, for local cache storage)
+###############################################################################
+format_usb_stick() {
+    info "Detecting USB block devices for local cache storage…"
+
+    mapfile -t USB_DEVS < <(
+        lsblk -dnpo NAME,TRAN | awk '$2=="usb"{print $1}' | sort
+    )
+
+    if [[ ${#USB_DEVS[@]} -lt 1 ]]; then
+        warn "No USB sticks found — local cache will use SD card."
+        return 1
+    fi
+
+    # Pick the largest USB device
+    mapfile -t SORTED < <(
+        for d in "${USB_DEVS[@]}"; do
+            sz=$(lsblk -bdnpo SIZE "$d" 2>/dev/null || echo 0)
+            echo "$sz $d"
+        done | sort -rn | head -1 | awk '{print $2}'
+    )
+
+    USB_DEV="${SORTED[0]}"
+    info "USB stick for local cache: $USB_DEV"
+
+    read -rp "Format USB stick as exFAT for local cache/renders? ALL DATA WILL BE LOST. [y/N] " yn
+    [[ "$yn" =~ ^[Yy]$ ]] || { warn "Skipping USB format."; return 1; }
+
+    info "Formatting $USB_DEV as exFAT…"
+    wipefs -a "$USB_DEV"
+    echo -e "o\nn\np\n1\n\n\nt\n7\nw" | fdisk "$USB_DEV" || true
+    sleep 1
+    PART="${USB_DEV}1"
+    [[ -b "$PART" ]] || PART="$USB_DEV"
+    mkfs.exfat -n PI2CACHE "$PART"
+
+    sleep 1
+    [[ -b "${USB_DEV}1" ]] && PART="${USB_DEV}1" || PART="$USB_DEV"
+    USB_UUID=$(blkid -s UUID -o value "$PART")
+
+    info "USB UUID: $USB_UUID"
+
+    # Remove old /data USB entry if present
+    sed -i '\|/data |d' /etc/fstab
+
+    cat >> /etc/fstab <<EOF
+UUID=${USB_UUID}  /data  exfat  defaults,nofail,uid=1000,gid=1000,dmask=0022,fmask=0133  0  0
+EOF
+
+    mkdir -p /data
+    mount -a
+    info "USB stick mounted at /data."
+}
+
+# Only format if /data is not already a USB mount
+if ! mountpoint -q /data 2>/dev/null; then
+    format_usb_stick || warn "USB setup skipped — using SD card for /data."
+fi
+
+###############################################################################
+# 4b. Create local data directories
 ###############################################################################
 info "Creating local data directories…"
 mkdir -p /data/cache /data/renders /mnt/timelapse
@@ -161,11 +221,27 @@ mkdir -p /data/cache /data/renders /mnt/timelapse
 ###############################################################################
 info "Configuring Samba mount…"
 
+# Create credentials file for Samba guest mount (avoids fstab inline creds)
+cat > /etc/samba/pi1_credentials <<'EOF'
+username=guest
+password=
+EOF
+chmod 600 /etc/samba/pi1_credentials
+
 # Append fstab entry
 if ! grep -q "192.168.50.1/timelapse" /etc/fstab; then
     cat >> /etc/fstab <<'EOF'
-//192.168.50.1/timelapse  /mnt/timelapse  cifs  guest,_netdev,nofail,x-systemd.automount,uid=1000,gid=1000,iocharset=utf8,vers=3.0  0  0
+//192.168.50.1/timelapse  /mnt/timelapse  cifs  credentials=/etc/samba/pi1_credentials,_netdev,nofail,x-systemd.automount,uid=1000,gid=1000,iocharset=utf8,vers=3.0  0  0
 EOF
+fi
+
+# Verify Samba connectivity to Pi 1 (non-blocking — Pi 1 may not be up yet)
+info "Testing Samba connectivity to Pi 1…"
+if smbclient -N -L //192.168.50.1 2>/dev/null | grep -qi timelapse; then
+    info "✓ Samba share 'timelapse' found on Pi 1"
+else
+    warn "Could not reach Pi 1 Samba share — Pi 1 may not be running yet."
+    warn "The share will be mounted automatically at boot via systemd automount."
 fi
 
 # Create credentials-free mount  
@@ -241,7 +317,70 @@ fi
 systemctl restart systemd-journald 2>/dev/null || true
 
 ###############################################################################
-# 10. Final
+# 10. Waveshare round display configuration
+###############################################################################
+info "Configuring Waveshare 5-inch round display…"
+
+# Disable console blanking so the display stays on permanently
+if [[ -f /boot/firmware/cmdline.txt ]]; then
+    CMDLINE="/boot/firmware/cmdline.txt"
+elif [[ -f /boot/cmdline.txt ]]; then
+    CMDLINE="/boot/cmdline.txt"
+else
+    CMDLINE=""
+fi
+
+if [[ -n "$CMDLINE" ]]; then
+    # Add consoleblank=0 if not already present
+    if ! grep -q "consoleblank=0" "$CMDLINE"; then
+        sed -i 's/$/ consoleblank=0/' "$CMDLINE"
+        info "Disabled console blanking in $CMDLINE"
+    fi
+fi
+
+# Enable DRM/KMS overlay for Waveshare round display in config.txt
+if [[ -f /boot/firmware/config.txt ]]; then
+    BOOT_CFG="/boot/firmware/config.txt"
+elif [[ -f /boot/config.txt ]]; then
+    BOOT_CFG="/boot/config.txt"
+else
+    BOOT_CFG=""
+fi
+
+if [[ -n "$BOOT_CFG" ]]; then
+    # Ensure DRM VC4 KMS overlay is enabled (required for mpv --vo=drm)
+    if ! grep -q "^dtoverlay=vc4-kms-v3d" "$BOOT_CFG"; then
+        echo "dtoverlay=vc4-kms-v3d" >> "$BOOT_CFG"
+        info "Enabled vc4-kms-v3d overlay"
+    fi
+    # Disable screen blanking via DPMS
+    if ! grep -q "^hdmi_blanking=1" "$BOOT_CFG"; then
+        echo "# Prevent HDMI/DSI blanking for always-on display" >> "$BOOT_CFG"
+        echo "hdmi_blanking=0" >> "$BOOT_CFG"
+    fi
+fi
+
+# Create a systemd service to disable DPMS/screen blanking at boot
+cat > /etc/systemd/system/disable-blanking.service <<'EOF'
+[Unit]
+Description=Disable display blanking for always-on timelapse playback
+After=multi-user.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c 'setterm --blank 0 --powerdown 0 > /dev/tty1 2>/dev/null || true; echo 0 > /sys/class/graphics/fb0/blank 2>/dev/null || true'
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl daemon-reload
+systemctl enable disable-blanking.service
+
+info "Waveshare display configuration complete."
+
+###############################################################################
+# 11. Final
 ###############################################################################
 info "Starting services…"
 systemctl restart chrony 2>/dev/null || true

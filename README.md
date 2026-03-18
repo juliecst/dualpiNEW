@@ -32,7 +32,8 @@ A production-ready, self-healing timelapse capture and display system designed f
 - 2× Raspberry Pi 4 with Raspberry Pi OS Lite 64-bit (Bookworm)
 - 1× Pi HQ Camera connected to Pi 1
 - 2× USB sticks (Working + Backup) plugged into Pi 1
-- 1× Waveshare round display connected to Pi 2
+- 1× USB stick (optional) plugged into Pi 2 for local cache storage
+- 1× Waveshare 5-inch round display connected to Pi 2 (DSI/DPI or HDMI)
 - No internet connection required
 
 ### Step 1: Flash Both SD Cards
@@ -82,7 +83,14 @@ touch /Volumes/bootfs/ssh
    ssh pi@<pi2-ip>
    sudo bash ~/pi2/setup.sh
    ```
-5. Pi 2 will connect to Pi 1's AP, mount the Samba share, and start playback
+5. The script will:
+   - Install all dependencies (including `exfatprogs` for USB formatting)
+   - Detect and optionally format a USB stick as exFAT for local cache/render storage
+   - Configure WiFi client connection to Pi 1's AP
+   - Set up Samba mount with credential file for reliable guest authentication
+   - Configure the Waveshare 5-inch round display (DRM/KMS, blanking disabled)
+   - Enable all systemd services for autostart on boot
+6. Pi 2 will connect to Pi 1's AP, mount the Samba share, and start playback automatically
 
 ### Daily power-off / power-on behavior
 
@@ -359,8 +367,8 @@ All settings live in `/data/config.json` on Pi 1. The admin portal reads and wri
 
 ### Pi 2
 ```
-/mnt/timelapse/   ← Samba mount from Pi 1 (read-only)
-/data/
+/mnt/timelapse/   ← Samba mount from Pi 1 (read-only, guest auth via credential file)
+/data/            ← USB stick (exFAT, optional) or SD card fallback
   cache/          ← Local copy of current session frames
     session.id
     frame_000001.jpg
@@ -432,6 +440,14 @@ ls /data/cache/frame_*.jpg | wc -l
 
 # Check if mpv is running
 pgrep -fa mpv
+
+# List connected DRM displays (Waveshare round / HDMI)
+ls /sys/class/drm/*/status 2>/dev/null | while read f; do
+    echo "$(dirname "$f" | xargs basename): $(cat "$f")"
+done
+
+# Verify display blanking is disabled
+sudo systemctl status disable-blanking.service
 ```
 
 ### Samba Mount Not Working on Pi 2
@@ -439,12 +455,18 @@ pgrep -fa mpv
 # Test connectivity
 ping -c 3 192.168.50.1
 
-# Try manual mount
-sudo mount -t cifs //192.168.50.1/timelapse /mnt/timelapse -o guest,vers=3.0
+# List available shares (guest, no password)
+smbclient -N -L //192.168.50.1
+
+# Try manual mount (uses credential file)
+sudo mount -t cifs //192.168.50.1/timelapse /mnt/timelapse -o credentials=/etc/samba/pi1_credentials,vers=3.0
 
 # Check mount
 df -h /mnt/timelapse
 ls /mnt/timelapse/current/
+
+# Verify Pi 1's Samba config allows guest access
+# On Pi 1: testparm -s /etc/samba/smb.conf
 ```
 
 ---
@@ -456,7 +478,7 @@ pi1/
   setup.sh              ← Full Pi 1 setup (run as root)
   hostapd.conf          ← WiFi AP config
   dnsmasq.conf          ← DHCP/DNS config
-  smb.conf              ← Samba shares config
+  smb.conf              ← Samba shares config (guest auth, no passwords)
   chrony.conf           ← NTP server config
   fstab_entries.txt     ← Reference fstab lines for USB sticks
   services/
@@ -468,13 +490,13 @@ pi1/
     disk_monitor.sh     ← Disk usage monitor cron script
 
 pi2/
-  setup.sh              ← Full Pi 2 setup (run as root)
-  fstab_entries.txt     ← Reference fstab lines
+  setup.sh              ← Full Pi 2 setup (run as root; USB format + Waveshare display config)
+  fstab_entries.txt     ← Reference fstab lines (USB, Samba, tmpfs)
   services/
-    sync.py             ← Image sync service
+    sync.py             ← Image sync service (with Samba connectivity checks)
     sync.service        ← systemd unit
-    playback.py         ← mpv playback controller
-    playback.service    ← systemd unit
+    playback.py         ← mpv playback controller (DRM auto-detect, boot wait)
+    playback.service    ← systemd unit (DRM/video group access)
     render.sh           ← Archival render cron script
     status_api.py       ← Flask status API
     status_api.service  ← systemd unit

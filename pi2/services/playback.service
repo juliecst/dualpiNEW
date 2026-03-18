@@ -13,8 +13,10 @@ User=root
 StandardOutput=journal
 StandardError=journal
 Environment=PYTHONUNBUFFERED=1
-Environment=DISPLAY=:0
+# DRM/KMS access for mpv on Waveshare round display
 Environment=XDG_RUNTIME_DIR=/run/user/0
+# Grant access to DRM/graphics devices
+SupplementaryGroups=video render
 
 [Install]
 WantedBy=multi-user.target
