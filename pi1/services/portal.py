@@ -1204,6 +1204,8 @@ def new_session():
         # Restart capture service to pick up fresh session
         try:
             subprocess.run(["systemctl", "restart", "capture.service"], capture_output=True, timeout=15)
+        except subprocess.TimeoutExpired:
+            log.warning("Timed out restarting capture.service after new session")
         except Exception:
             log.warning("Failed to restart capture.service after new session", exc_info=True)
 
@@ -1320,6 +1322,7 @@ def health():
         checks["backup_mounted"] = False
     all_ok = (
         checks.get("data_mounted") is True
+        and checks.get("backup_mounted") is True
         and checks.get("backup_ok") is True
     )
     return jsonify({"status": "ok" if all_ok else "degraded", **checks})
