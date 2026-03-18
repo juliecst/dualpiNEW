@@ -150,8 +150,8 @@ def validate_ip_or_hostname(value: str) -> bool:
             return all(0 <= int(p) <= 255 for p in parts)
         except ValueError:
             pass
-    # Simple hostname check (letters, digits, hyphens, dots)
-    return bool(re.match(r'^[a-zA-Z0-9]([a-zA-Z0-9\-\.]{0,61}[a-zA-Z0-9])?$', value))
+    # Simple hostname check (letters, digits, hyphens, dots — no consecutive dots)
+    return bool(re.match(r'^[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?)*$', value))
 
 
 def run_command(cmd, timeout: int = 15, check: bool = False, input_text: str = None):
@@ -1726,8 +1726,8 @@ font-size:.65rem;color:#fff;position:relative;transition:height .3s}
         <div class="helper">Only enter a value if you want to change the portal login.</div>
       </div>
       <div>
-        <label>Pi 2 IP Address</label>
-        <input type="text" name="pi2_ip" value="{{ cfg.pi2_ip|e }}" maxlength="63" placeholder="Auto-discover (leave blank) or e.g. 192.168.50.20">
+        <label for="pi2-ip-input">Pi 2 IP Address</label>
+        <input type="text" id="pi2-ip-input" name="pi2_ip" value="{{ cfg.pi2_ip|e }}" maxlength="63" placeholder="Auto-discover (leave blank) or e.g. 192.168.50.20">
         <div class="helper">Set Pi 2's IP address or hostname manually. Leave blank to auto-discover via mDNS, DHCP leases, and ARP scan.</div>
       </div>
       <div>
@@ -1967,7 +1967,7 @@ function pollPi2(){
         document.getElementById('pi2-offline').classList.remove('hidden');
         document.getElementById('pi2-online').classList.add('offline');
         var hint=document.getElementById('pi2-offline-hint');
-        if(hint && d.tried_hosts){hint.innerHTML='Tried: '+d.tried_hosts.join(', ')+'. Last error: '+(d.error||'unknown')+'. Set the IP in <em>Admin &amp; Network</em> if Pi 2 has a different address.';}
+        if(hint && d.tried_hosts){hint.textContent='Tried: '+d.tried_hosts.join(', ')+'. Last error: '+(d.error||'unknown')+'. Set the IP in Admin & Network if Pi 2 has a different address.';}
         ['p2-frame','p2-state','p2-fps','p2-uptime','p2-temp','p2-disk','p2-sync','p2-wifi'].forEach(id=>{
           document.getElementById(id).textContent='–';
         });
