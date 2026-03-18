@@ -89,6 +89,7 @@ def read_config() -> dict:
         "uplink_wifi_ssid": "",
         "uplink_wifi_password": "",
         "display_type": "hdmi",
+        "pi2_ip": "",
     }
     try:
         with open(CONFIG_PATH, "r") as f:
@@ -135,6 +136,22 @@ def sanitize_ssid(value: str, default: str):
     if len(ssid) > 32 or any(ord(ch) < 32 or ord(ch) == 127 for ch in ssid):
         return default, "WiFi SSID must be 1-32 printable characters, so the previous SSID was kept."
     return ssid, None
+
+
+def validate_ip_or_hostname(value: str) -> bool:
+    """Return True if *value* looks like a valid IPv4 address or hostname."""
+    value = (value or "").strip()
+    if not value:
+        return True  # empty means "auto-discover"
+    # IPv4 check
+    parts = value.split(".")
+    if len(parts) == 4:
+        try:
+            return all(0 <= int(p) <= 255 for p in parts)
+        except ValueError:
+            pass
+    # Simple hostname check (letters, digits, hyphens, dots — no consecutive dots)
+    return bool(re.match(r'^[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?)*$', value))
 
 
 def run_command(cmd, timeout: int = 15, check: bool = False, input_text: str = None):
@@ -265,11 +282,21 @@ def get_pi2_api_candidates() -> list:
         seen.add(host)
         candidates.append(host)
 
+    # 1. User-configured IP/hostname takes highest priority
+    cfg_ip = read_config().get("pi2_ip", "").strip()
+    if cfg_ip:
+        add_candidate(cfg_ip)
+
+    # 2. mDNS hostname (avahi)
+    add_candidate("pi2-display.local")
+
+    # 3. Derive from Pi 1's wlan0 subnet
     pi1_wlan = get_interface_addresses("wlan0")["ipv4"]
     if pi1_wlan:
         parts = pi1_wlan[0].split(".")
         if len(parts) == 4:
             add_candidate(".".join(parts[:3] + ["20"]))
+    # 4. DHCP leases
     try:
         with open(DNSMASQ_LEASES) as f:
             for line in f:
@@ -278,6 +305,7 @@ def get_pi2_api_candidates() -> list:
                     add_candidate(lease[2])
     except Exception:
         pass
+    # 5. ARP neighbor scan
     try:
         result = run_command(["ip", "neigh", "show", "dev", "wlan0"], timeout=5)
         if result.returncode == 0:
@@ -287,6 +315,7 @@ def get_pi2_api_candidates() -> list:
                     add_candidate(parts[0])
     except Exception:
         pass
+    # 6. Hardcoded default
     add_candidate(PI2_DEFAULT_IP)
     return candidates
 
@@ -295,8 +324,10 @@ def proxy_pi2_request(path: str, method: str = "GET", payload: dict = None):
     body = json.dumps(payload).encode() if payload is not None else None
     headers = {"Content-Type": "application/json"} if payload is not None else {}
     last_error = "Pi 2 is unreachable."
+    tried_hosts = []
     for host in get_pi2_api_candidates():
         url = f"http://{host}:{PI2_API_PORT}{path}"
+        tried_hosts.append(host)
         try:
             request_obj = urllib.request.Request(url, data=body, headers=headers, method=method)
             with urllib.request.urlopen(request_obj, timeout=4) as response:
@@ -309,7 +340,7 @@ def proxy_pi2_request(path: str, method: str = "GET", payload: dict = None):
             last_error = exc.read().decode() or str(exc)
         except Exception as exc:
             last_error = str(exc)
-    return {"error": last_error}, 502
+    return {"error": last_error, "tried_hosts": tried_hosts}, 502
 
 
 def get_rpicam_status() -> dict:
@@ -1044,6 +1075,12 @@ def update_config():
         cfg["admin_password"] = data["admin_password"]
         if cfg["admin_password"] != old_cfg.get("admin_password"):
             messages.append(("success", "Admin password updated."))
+    if "pi2_ip" in data:
+        pi2_ip = data["pi2_ip"].strip()
+        if pi2_ip and not validate_ip_or_hostname(pi2_ip):
+            messages.append(("warning", "Pi 2 address must be a valid IPv4 address or hostname — previous value kept."))
+        else:
+            cfg["pi2_ip"] = pi2_ip
     wifi_changed = False
     if "wifi_ssid" in data:
         wifi_ssid, ssid_error = sanitize_ssid(data["wifi_ssid"], old_cfg.get("wifi_ssid", cfg["wifi_ssid"]))
@@ -1689,6 +1726,11 @@ font-size:.65rem;color:#fff;position:relative;transition:height .3s}
         <div class="helper">Only enter a value if you want to change the portal login.</div>
       </div>
       <div>
+        <label for="pi2-ip-input">Pi 2 IP Address</label>
+        <input type="text" id="pi2-ip-input" name="pi2_ip" value="{{ cfg.pi2_ip|e }}" maxlength="63" placeholder="Auto-discover (leave blank) or e.g. 192.168.50.20">
+        <div class="helper">Set Pi 2's IP address or hostname manually. Leave blank to auto-discover via mDNS, DHCP leases, and ARP scan.</div>
+      </div>
+      <div>
         <label>WiFi SSID</label>
         <input type="text" name="wifi_ssid" value="{{ cfg.wifi_ssid|e }}" maxlength="32" pattern=".*\S+.*" required>
       </div>
@@ -1814,6 +1856,10 @@ font-size:.65rem;color:#fff;position:relative;transition:height .3s}
 <div class="card" id="pi2-status">
   <div id="pi2-offline" class="hidden" style="text-align:center;padding:1rem">
     <span class="badge badge-off">Pi 2 Offline</span>
+    <div id="pi2-offline-hint" style="font-size:.8rem;color:#8b949e;margin-top:.5rem">
+      Could not reach Pi 2 status API. {% if cfg.pi2_ip %}Configured address: <strong>{{ cfg.pi2_ip|e }}</strong>.{% else %}No address configured — using auto-discovery.{% endif %}
+      Set the IP in <em>Admin & Network</em> if Pi 2 has a different address.
+    </div>
   </div>
   <div id="pi2-online">
     <div class="stat-row">
@@ -1913,10 +1959,20 @@ function switchPi1Mode(mode){
 // Poll Pi 2 status every 10 seconds
 function pollPi2(){
   var ctrl=new AbortController();
-  var tid=setTimeout(()=>ctrl.abort(),2000);
+  var tid=setTimeout(()=>ctrl.abort(),8000);
   fetch('/api/pi2/status',{signal:ctrl.signal})
-    .then(r=>{clearTimeout(tid);return r.json()})
-    .then(d=>{
+    .then(r=>{clearTimeout(tid);return r.json().then(d=>({ok:r.ok,data:d}))})
+    .then(({ok,data:d})=>{
+      if(!ok || d.error){
+        document.getElementById('pi2-offline').classList.remove('hidden');
+        document.getElementById('pi2-online').classList.add('offline');
+        var hint=document.getElementById('pi2-offline-hint');
+        if(hint && d.tried_hosts){hint.textContent='Tried: '+d.tried_hosts.join(', ')+'. Last error: '+(d.error||'unknown')+'. Set the IP in Admin & Network if Pi 2 has a different address.';}
+        ['p2-frame','p2-state','p2-fps','p2-uptime','p2-temp','p2-disk','p2-sync','p2-wifi'].forEach(id=>{
+          document.getElementById(id).textContent='–';
+        });
+        return;
+      }
       document.getElementById('pi2-offline').classList.add('hidden');
       document.getElementById('pi2-online').classList.remove('offline');
       document.getElementById('p2-frame').textContent=d.frame_current+' / '+d.frame_total;
