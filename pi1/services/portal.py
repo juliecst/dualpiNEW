@@ -37,6 +37,7 @@ log = logging.getLogger("portal")
 
 app = Flask(__name__)
 app.secret_key = os.urandom(32)
+app.config["PROPAGATE_EXCEPTIONS"] = False
 
 CONFIG_PATH = "/data/config.json"
 CURRENT_DIR = "/data/timelapse/current"
@@ -677,16 +678,24 @@ def get_backup_status(last_backup: str) -> dict:
         if os.stat("/backup").st_dev == os.stat("/").st_dev:
             return build_status("error", "Wrong disk", "Backup path points to the same device as the SD card.")
     except Exception:
+        log.warning("Backup device health check failed", exc_info=True)
         return build_status("error", "Unavailable", "Backup device health could not be verified.")
     if not last_backup:
         return build_status("warning", "Waiting", "Backup stick is ready, but no successful backup has been recorded yet.")
     try:
         last_backup_dt = datetime.fromisoformat(last_backup)
     except Exception:
+        log.warning("Backup timestamp %r could not be parsed", last_backup)
         return build_status("warning", "Unknown", f'Backup timestamp "{last_backup}" could not be parsed.')
-    if last_backup_dt.tzinfo is None:
-        last_backup_dt = last_backup_dt.replace(tzinfo=timezone.utc)
-    backup_age = datetime.now(timezone.utc) - last_backup_dt
+    try:
+        if last_backup_dt.tzinfo is None:
+            last_backup_dt = last_backup_dt.replace(tzinfo=timezone.utc)
+        backup_age = datetime.now(timezone.utc) - last_backup_dt
+    except TypeError:
+        log.warning("Backup age calculation failed due to tz mismatch", exc_info=True)
+        backup_age = None
+    if backup_age is None:
+        return build_status("warning", "Unknown", f"Backup timestamp recorded but age could not be calculated.")
     if backup_age > timedelta(hours=26):
         return build_status("warning", "Stale", f"Last successful backup was {last_backup_dt.isoformat(timespec='minutes')}.")
     return build_status("ok", "Healthy", f"Last successful backup finished {last_backup_dt.isoformat(timespec='minutes')}.")
@@ -822,28 +831,115 @@ def logout():
 @login_required
 def dashboard():
     cfg = read_config()
-    frames = count_frames(CURRENT_DIR)
-    last_cap = read_timestamp_file(LAST_CAPTURE)
-    last_bak = read_timestamp_file(LAST_BACKUP)
-    session_id = get_session_id()
-    archives = list_archives()
-    disk_data = get_disk_usage("/data")
-    disk_backup = get_disk_usage("/backup")
-    backup_status = get_backup_status(last_bak)
-    disk_status = get_disk_status(disk_data)
-    wifi_status = get_pi1_wifi_status(cfg)
-    current_host = (request.host.split(":", 1)[0] or "").strip("[]")
-    network_info = get_pi1_network_summary(cfg, current_host)
-    camera_status = get_rpicam_status()
-    storage_projection = build_storage_projection(
-        frames,
-        archives,
-        disk_data,
-        cfg["capture_interval_minutes"],
-    )
+    _safe_status = build_status("off", "–", "Status unavailable.")
+
+    try:
+        frames = count_frames(CURRENT_DIR)
+    except Exception:
+        log.exception("Failed to count frames")
+        frames = 0
+
+    try:
+        last_cap = read_timestamp_file(LAST_CAPTURE)
+    except Exception:
+        log.warning("Failed to read last capture timestamp")
+        last_cap = ""
+
+    try:
+        last_bak = read_timestamp_file(LAST_BACKUP)
+    except Exception:
+        log.warning("Failed to read last backup timestamp")
+        last_bak = ""
+
+    try:
+        session_id = get_session_id()
+    except Exception:
+        log.warning("Failed to read session ID")
+        session_id = "unknown"
+
+    try:
+        archives = list_archives()
+    except Exception:
+        log.exception("Failed to list archives")
+        archives = []
+
+    try:
+        disk_data = get_disk_usage("/data")
+    except Exception:
+        log.exception("Failed to get /data disk usage")
+        disk_data = {
+            "path": "/data", "total_gb": 0, "used_gb": 0, "free_gb": 0,
+            "total_bytes": 0, "used_bytes": 0, "free_bytes": 0, "percent": 0,
+        }
+
+    try:
+        disk_backup = get_disk_usage("/backup")
+    except Exception:
+        log.exception("Failed to get /backup disk usage")
+        disk_backup = {
+            "path": "/backup", "total_gb": 0, "used_gb": 0, "free_gb": 0,
+            "total_bytes": 0, "used_bytes": 0, "free_bytes": 0, "percent": 0,
+        }
+
+    try:
+        backup_status = get_backup_status(last_bak)
+    except Exception:
+        log.exception("Backup status check failed")
+        backup_status = _safe_status
+
+    try:
+        disk_status = get_disk_status(disk_data)
+    except Exception:
+        log.exception("Disk status check failed")
+        disk_status = _safe_status
+
+    try:
+        wifi_status = get_pi1_wifi_status(cfg)
+    except Exception:
+        log.exception("WiFi status check failed")
+        wifi_status = _safe_status
+
+    try:
+        current_host = (request.host.split(":", 1)[0] or "").strip("[]")
+        network_info = get_pi1_network_summary(cfg, current_host)
+    except Exception:
+        log.exception("Network summary failed")
+        current_host = "localhost"
+        network_info = {
+            "mode": "unknown", "mode_label": "Unknown",
+            "wlan0_ipv4": [], "wlan0_ipv6": [], "eth0_ipv4": [],
+            "current_host": current_host, "access_hosts": [current_host],
+            "message": "Network information unavailable.", "uplink_ssid": "",
+        }
+
+    try:
+        camera_status = get_rpicam_status()
+    except Exception:
+        log.exception("Camera status check failed")
+        camera_status = build_status("off", "–", "Camera status unavailable.")
+        camera_status["preview_available"] = False
+        camera_status["preview_timestamp"] = 0
+
+    try:
+        storage_projection = build_storage_projection(
+            frames, archives, disk_data, cfg["capture_interval_minutes"],
+        )
+    except Exception:
+        log.exception("Storage projection failed")
+        storage_projection = {
+            "average_frame_mb": 0, "remaining_frames": None,
+            "remaining_hours": None, "remaining_days": None,
+            "estimate_message": "Storage estimate is temporarily unavailable.",
+            "chart": [{"label": "now", "frames": frames}], "chart_max_frames": max(frames, 1),
+        }
+
+    try:
+        next_preview = next_session_id()
+    except Exception:
+        log.warning("Failed to generate next session ID")
+        next_preview = "unknown"
 
     fps_options = [6, 12, 18, 25, 30, 48, 60, 120]
-    # Compute durations for each FPS option
     fps_durations = {}
     for fps in fps_options:
         if fps > 0:
@@ -870,7 +966,7 @@ def dashboard():
         network_info=network_info,
         camera_status=camera_status,
         storage_projection=storage_projection,
-        next_session_preview=next_session_id(),
+        next_session_preview=next_preview,
         fps_options=fps_options,
         fps_durations=fps_durations,
     )
@@ -979,12 +1075,22 @@ def update_config():
             else:
                 cfg["uplink_wifi_password"] = uplink_password
     if wifi_changed:
-        update_hostapd_credentials(cfg)
-        if get_pi1_network_mode() == "ap":
-            run_command(["systemctl", "restart", "hostapd"], timeout=15)
-        messages.append(("warning", "Access-point settings saved on Pi 1. Update Pi 2 too if it needs to reconnect with the new AP password."))
+        try:
+            update_hostapd_credentials(cfg)
+            if get_pi1_network_mode() == "ap":
+                run_command(["systemctl", "restart", "hostapd"], timeout=15)
+        except Exception:
+            log.exception("Failed to apply hostapd credential changes")
+            messages.append(("error", "WiFi credential update failed — check portal logs."))
+        else:
+            messages.append(("warning", "Access-point settings saved on Pi 1. Update Pi 2 too if it needs to reconnect with the new AP password."))
 
-    write_config(cfg)
+    try:
+        write_config(cfg)
+    except Exception:
+        log.exception("Failed to write config")
+        flash("Could not save settings — check portal logs.", "error")
+        return redirect(url_for("dashboard"))
     if not messages:
         messages.append(("success", f"{section.capitalize()} settings saved."))
     for category, message in messages:
@@ -1074,55 +1180,66 @@ def proxy_pi2_brightness():
 @login_required
 def new_session():
     """Archive current session and start fresh."""
-    session_id = get_session_id()
-    frame_count = count_frames(CURRENT_DIR)
+    try:
+        session_id = get_session_id()
+        frame_count = count_frames(CURRENT_DIR)
 
-    if frame_count > 0:
-        archive_dest = os.path.join(ARCHIVE_DIR, session_id)
-        os.makedirs(archive_dest, exist_ok=True)
-        # Move all files from current to archive
-        for f in os.listdir(CURRENT_DIR):
-            src = os.path.join(CURRENT_DIR, f)
-            dst = os.path.join(archive_dest, f)
-            shutil.move(src, dst)
+        if frame_count > 0:
+            archive_dest = os.path.join(ARCHIVE_DIR, session_id)
+            os.makedirs(archive_dest, exist_ok=True)
+            # Move all files from current to archive
+            for f in os.listdir(CURRENT_DIR):
+                src = os.path.join(CURRENT_DIR, f)
+                dst = os.path.join(archive_dest, f)
+                shutil.move(src, dst)
 
-    # Create fresh session
-    os.makedirs(CURRENT_DIR, exist_ok=True)
-    new_id = next_session_id()
-    tmp = os.path.join(CURRENT_DIR, "session.id.tmp")
-    with open(tmp, "w") as f:
-        f.write(new_id)
-    os.rename(tmp, os.path.join(CURRENT_DIR, "session.id"))
+        # Create fresh session
+        os.makedirs(CURRENT_DIR, exist_ok=True)
+        new_id = next_session_id()
+        tmp = os.path.join(CURRENT_DIR, "session.id.tmp")
+        with open(tmp, "w") as f:
+            f.write(new_id)
+        os.rename(tmp, os.path.join(CURRENT_DIR, "session.id"))
 
-    # Restart capture service to pick up fresh session
-    subprocess.run(["systemctl", "restart", "capture.service"], capture_output=True)
+        # Restart capture service to pick up fresh session
+        try:
+            subprocess.run(["systemctl", "restart", "capture.service"], capture_output=True, timeout=15)
+        except Exception:
+            log.warning("Failed to restart capture.service after new session", exc_info=True)
 
-    flash("Started a new session and archived the previous frames.", "success")
+        flash("Started a new session and archived the previous frames.", "success")
+    except Exception as exc:
+        log.exception("New session creation failed")
+        flash(f"New session failed: {exc}", "error")
     return redirect(url_for("dashboard"))
 
 
 @app.route("/api/archive_note", methods=["POST"])
 @login_required
 def archive_note():
-    archive_name = request.form.get("archive_name", "")
-    archive_dir = get_archive_path(archive_name)
-    if not archive_dir:
-        flash("Archive not found.", "error")
-        return redirect(url_for("dashboard"))
-    note = sanitize_session_note(request.form.get("note", ""))
-    note_path = os.path.join(archive_dir, SESSION_NOTE_FILE)
-    if note:
-        tmp = note_path + ".tmp"
-        with open(tmp, "w") as f:
-            f.write(note)
-        os.rename(tmp, note_path)
-        flash(f"Saved label for {archive_name}.", "success")
-    else:
-        try:
-            os.remove(note_path)
-        except FileNotFoundError:
-            pass
-        flash(f"Cleared label for {archive_name}.", "success")
+    try:
+        archive_name = request.form.get("archive_name", "")
+        archive_dir = get_archive_path(archive_name)
+        if not archive_dir:
+            flash("Archive not found.", "error")
+            return redirect(url_for("dashboard"))
+        note = sanitize_session_note(request.form.get("note", ""))
+        note_path = os.path.join(archive_dir, SESSION_NOTE_FILE)
+        if note:
+            tmp = note_path + ".tmp"
+            with open(tmp, "w") as f:
+                f.write(note)
+            os.rename(tmp, note_path)
+            flash(f"Saved label for {archive_name}.", "success")
+        else:
+            try:
+                os.remove(note_path)
+            except FileNotFoundError:
+                pass
+            flash(f"Cleared label for {archive_name}.", "success")
+    except Exception as exc:
+        log.exception("Archive note update failed")
+        flash(f"Could not update archive label: {exc}", "error")
     return redirect(url_for("dashboard"))
 
 
@@ -1140,19 +1257,23 @@ def thumbnail():
 @login_required
 def pi1_status():
     """JSON status for AJAX polling."""
-    cfg = read_config()
-    return jsonify({
-        "uptime": get_uptime(),
-        "cpu_temp": get_cpu_temp(),
-        "disk_data": get_disk_usage("/data"),
-        "disk_backup": get_disk_usage("/backup"),
-        "frames": count_frames(CURRENT_DIR),
-        "last_capture": read_timestamp_file(LAST_CAPTURE),
-        "last_backup": read_timestamp_file(LAST_BACKUP),
-        "backup_warning": os.path.isfile(BACKUP_WARNING),
-        "disk_warning": os.path.isfile(DISK_WARNING),
-        "session_id": get_session_id(),
-    })
+    try:
+        cfg = read_config()
+        return jsonify({
+            "uptime": get_uptime(),
+            "cpu_temp": get_cpu_temp(),
+            "disk_data": get_disk_usage("/data"),
+            "disk_backup": get_disk_usage("/backup"),
+            "frames": count_frames(CURRENT_DIR),
+            "last_capture": read_timestamp_file(LAST_CAPTURE),
+            "last_backup": read_timestamp_file(LAST_BACKUP),
+            "backup_warning": os.path.isfile(BACKUP_WARNING),
+            "disk_warning": os.path.isfile(DISK_WARNING),
+            "session_id": get_session_id(),
+        })
+    except Exception:
+        log.exception("Pi 1 status poll failed")
+        return jsonify({"error": "Status temporarily unavailable"}), 500
 
 
 @app.route("/generate_204")
@@ -1164,6 +1285,86 @@ def captive_portal_detect():
     if session.get("authenticated"):
         return redirect(url_for("dashboard"))
     return redirect(url_for("login"))
+
+
+# ── health & error handlers ──────────────────────────────────────────────────
+
+
+@app.route("/health")
+def health():
+    """Lightweight health-check endpoint for monitoring."""
+    checks = {}
+    try:
+        checks["frames"] = count_frames(CURRENT_DIR)
+    except Exception:
+        checks["frames"] = None
+    try:
+        checks["last_capture"] = read_timestamp_file(LAST_CAPTURE) or None
+    except Exception:
+        checks["last_capture"] = None
+    try:
+        last_bak = read_timestamp_file(LAST_BACKUP)
+        backup_info = get_backup_status(last_bak)
+        checks["backup_ok"] = backup_info.get("level") == "ok"
+        checks["backup_label"] = backup_info.get("label", "Unknown")
+    except Exception:
+        checks["backup_ok"] = False
+        checks["backup_label"] = "Error"
+    try:
+        checks["data_mounted"] = os.path.ismount("/data")
+    except Exception:
+        checks["data_mounted"] = False
+    try:
+        checks["backup_mounted"] = os.path.ismount("/backup")
+    except Exception:
+        checks["backup_mounted"] = False
+    all_ok = (
+        checks.get("data_mounted") is True
+        and checks.get("backup_ok") is True
+    )
+    return jsonify({"status": "ok" if all_ok else "degraded", **checks})
+
+
+ERROR_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Timelapse Admin — Error</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+background:#0d1117;color:#c9d1d9;display:flex;align-items:center;justify-content:center;min-height:100vh}
+.card{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:2rem;width:100%;max-width:480px;text-align:center}
+h1{font-size:1.4rem;margin-bottom:1rem;color:#f85149}
+p{margin-bottom:1rem;color:#8b949e;font-size:.95rem}
+a{color:#58a6ff;text-decoration:none;font-weight:600}
+a:hover{text-decoration:underline}
+code{background:#0d1117;border:1px solid #30363d;border-radius:4px;padding:.15rem .4rem;font-size:.85rem}
+</style></head>
+<body><div class="card">
+<h1>{{ title }}</h1>
+<p>{{ message }}</p>
+<a href="/">← Back to Dashboard</a>
+</div></body></html>"""
+
+
+@app.errorhandler(404)
+def handle_404(exc):
+    return render_template_string(
+        ERROR_HTML,
+        title="Page Not Found",
+        message="The page you requested does not exist.",
+    ), 404
+
+
+@app.errorhandler(500)
+def handle_500(exc):
+    log.exception("Unhandled server error: %s", exc)
+    return render_template_string(
+        ERROR_HTML,
+        title="Something Went Wrong",
+        message="An unexpected error occurred. Check the portal logs for details.",
+    ), 500
 
 
 # ── HTML templates ───────────────────────────────────────────────────────────

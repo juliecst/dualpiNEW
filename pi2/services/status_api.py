@@ -198,24 +198,28 @@ def mpv_command(cmd: list):
 
 @app.route("/status", methods=["GET"])
 def status():
-    cfg = read_config()
-    frame_current, frame_total = get_frame_info()
-    used, total = get_disk_usage()
-    wifi_status = get_wifi_status(cfg.get("wifi_ssid", ""))
-    return jsonify({
-        "frame_current": frame_current,
-        "frame_total": frame_total,
-        "playback_state": get_playback_state(),
-        "uptime": get_uptime(),
-        "cpu_temp": get_cpu_temp(),
-        "disk_used_gb": used,
-        "disk_total_gb": total,
-        "last_sync_timestamp": get_last_sync(),
-        "session_id": get_session_id(),
-        "fps": cfg.get("playback_fps", 25),
-        "wifi_state": wifi_status["state"],
-        "wifi_message": wifi_status["message"],
-    })
+    try:
+        cfg = read_config()
+        frame_current, frame_total = get_frame_info()
+        used, total = get_disk_usage()
+        wifi_status = get_wifi_status(cfg.get("wifi_ssid", ""))
+        return jsonify({
+            "frame_current": frame_current,
+            "frame_total": frame_total,
+            "playback_state": get_playback_state(),
+            "uptime": get_uptime(),
+            "cpu_temp": get_cpu_temp(),
+            "disk_used_gb": used,
+            "disk_total_gb": total,
+            "last_sync_timestamp": get_last_sync(),
+            "session_id": get_session_id(),
+            "fps": cfg.get("playback_fps", 25),
+            "wifi_state": wifi_status["state"],
+            "wifi_message": wifi_status["message"],
+        })
+    except Exception:
+        log.exception("Status endpoint failed")
+        return jsonify({"error": "Status temporarily unavailable"}), 500
 
 
 @app.route("/display/brightness", methods=["POST"])
@@ -291,6 +295,32 @@ def sync_now():
     if result.returncode != 0:
         return jsonify({"error": result.stderr.strip() or "Failed to restart sync.service"}), 500
     return jsonify({"ok": True, "message": "Sync service restarting"})
+
+
+@app.route("/health")
+def health():
+    """Lightweight health-check endpoint for monitoring."""
+    checks = {}
+    try:
+        frame_current, frame_total = get_frame_info()
+        checks["frame_total"] = frame_total
+    except Exception:
+        checks["frame_total"] = None
+    try:
+        checks["last_sync"] = get_last_sync() or None
+    except Exception:
+        checks["last_sync"] = None
+    try:
+        checks["playback_state"] = get_playback_state()
+    except Exception:
+        checks["playback_state"] = "unknown"
+    return jsonify({"status": "ok", **checks})
+
+
+@app.errorhandler(500)
+def handle_500(exc):
+    log.exception("Unhandled server error: %s", exc)
+    return jsonify({"error": "Internal server error — check status-api logs"}), 500
 
 
 if __name__ == "__main__":
