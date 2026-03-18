@@ -337,7 +337,19 @@ def proxy_pi2_request(path: str, method: str = "GET", payload: dict = None):
                     data.setdefault("pi2_host", host)
                 return data, response.status
         except urllib.error.HTTPError as exc:
-            last_error = exc.read().decode() or str(exc)
+            # The host responded with an HTTP error. If the body is valid
+            # JSON it is likely Pi 2's status-api — pass it through so the
+            # caller gets the real status code instead of a generic 502.
+            try:
+                err_body = exc.read().decode()
+                err_data = json.loads(err_body)
+                if isinstance(err_data, dict):
+                    err_data.setdefault("pi2_host", host)
+                return err_data, exc.code
+            except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+                # Non-JSON response (e.g. another device on the network) —
+                # skip this candidate and keep trying.
+                last_error = str(exc)
         except Exception as exc:
             last_error = str(exc)
     return {"error": last_error, "tried_hosts": tried_hosts}, 502
@@ -575,6 +587,8 @@ def login_required(f):
     @functools.wraps(f)
     def wrapper(*args, **kwargs):
         if not session.get("authenticated"):
+            if request.path.startswith("/api/"):
+                return jsonify({"error": "Authentication required"}), 403
             return redirect(url_for("login"))
         return f(*args, **kwargs)
     return wrapper
@@ -1914,7 +1928,7 @@ function runPi2Action(path, successMessage){
       if(successMessage){alert(successMessage)}
       return data;
     })
-    .catch(err=>{alert(err.message||'Failed to reach Pi 2');throw err;});
+    .catch(err=>alert(err.message||'Failed to reach Pi 2'));
 }
 
 function setBrightness(showSuccess){
