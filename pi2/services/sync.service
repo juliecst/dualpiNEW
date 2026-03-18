@@ -13,6 +13,8 @@ User=root
 StandardOutput=journal
 StandardError=journal
 Environment=PYTHONUNBUFFERED=1
+WatchdogSec=180
+TimeoutStartSec=60
 
 [Install]
 WantedBy=multi-user.target

@@ -29,10 +29,12 @@ app = Flask(__name__)
 
 LOCAL_CACHE = "/data/cache"
 LAST_SYNC_FILE = "/data/last_sync.txt"
+SYNC_HEARTBEAT_FILE = "/data/sync_heartbeat.txt"
 MPV_SOCKET = "/tmp/mpv-socket"
 CONFIG_LOCAL = "/data/config_local.json"
 WIFI_STATUS_CACHE = {"timestamp": 0.0, "expected_ssid": None, "value": {"state": "warning", "message": "WiFi connection unavailable"}}
 WIFI_STATUS_LOCK = threading.Lock()
+SYNC_HEARTBEAT_MAX_AGE = 300  # seconds — sync should heartbeat at least every 5 minutes
 
 
 def read_config() -> dict:
@@ -194,6 +196,90 @@ def mpv_command(cmd: list):
         return {"error": str(e)}
 
 
+def get_systemd_service_state(name: str) -> dict:
+    """Return systemd ActiveState and SubState for a service unit."""
+    try:
+        result = subprocess.run(
+            ["systemctl", "show", name, "--property=ActiveState,SubState,NRestarts"],
+            capture_output=True, text=True, timeout=5,
+        )
+        props = {}
+        for line in result.stdout.strip().splitlines():
+            if "=" in line:
+                k, v = line.split("=", 1)
+                props[k] = v
+        return props
+    except Exception:
+        return {"ActiveState": "unknown", "SubState": "unknown"}
+
+
+def get_sync_health() -> dict:
+    """Check sync service health using both systemd state and heartbeat file."""
+    svc = get_systemd_service_state("sync.service")
+    active = svc.get("ActiveState", "unknown")
+    sub = svc.get("SubState", "unknown")
+    restarts = svc.get("NRestarts", "0")
+
+    heartbeat_age = None
+    heartbeat_ok = False
+    try:
+        with open(SYNC_HEARTBEAT_FILE) as f:
+            ts = f.read().strip()
+        from datetime import datetime
+        beat_dt = datetime.fromisoformat(ts)
+        heartbeat_age = (datetime.now() - beat_dt).total_seconds()
+        heartbeat_ok = heartbeat_age < SYNC_HEARTBEAT_MAX_AGE
+    except Exception:
+        pass
+
+    if active == "active" and heartbeat_ok:
+        state = "ok"
+        message = f"Running (heartbeat {int(heartbeat_age)}s ago)"
+    elif active == "active" and heartbeat_age is not None:
+        state = "warning"
+        message = f"Running but heartbeat stale ({int(heartbeat_age)}s ago)"
+    elif active == "active":
+        state = "warning"
+        message = "Running (no heartbeat file yet)"
+    elif active in ("activating", "reloading"):
+        state = "warning"
+        message = f"Starting ({sub})"
+    else:
+        state = "error"
+        message = f"Not running ({active}/{sub})"
+
+    return {"state": state, "message": message, "active": active, "sub": sub, "restarts": restarts}
+
+
+def get_service_statuses() -> dict:
+    """Aggregate health of all Pi 2 services."""
+    sync = get_sync_health()
+
+    playback_svc = get_systemd_service_state("playback.service")
+    playback_active = playback_svc.get("ActiveState", "unknown")
+    playback_sub = playback_svc.get("SubState", "unknown")
+    if playback_active == "active":
+        pb_state = "ok"
+        pb_msg = f"Running ({playback_sub})"
+    elif playback_active in ("activating", "reloading"):
+        pb_state = "warning"
+        pb_msg = f"Starting ({playback_sub})"
+    else:
+        pb_state = "error"
+        pb_msg = f"Not running ({playback_active}/{playback_sub})"
+
+    api_svc = get_systemd_service_state("status_api.service")
+    api_active = api_svc.get("ActiveState", "unknown")
+    api_state = "ok" if api_active == "active" else "error"
+    api_msg = "Running" if api_active == "active" else f"Degraded ({api_active})"
+
+    return {
+        "sync": {"state": sync["state"], "message": sync["message"], "restarts": sync.get("restarts", "0")},
+        "playback": {"state": pb_state, "message": pb_msg, "restarts": playback_svc.get("NRestarts", "0")},
+        "status_api": {"state": api_state, "message": api_msg, "restarts": api_svc.get("NRestarts", "0")},
+    }
+
+
 # ── Endpoints ────────────────────────────────────────────────────────────────
 
 @app.route("/status", methods=["GET"])
@@ -203,6 +289,7 @@ def status():
         frame_current, frame_total = get_frame_info()
         used, total = get_disk_usage()
         wifi_status = get_wifi_status(cfg.get("wifi_ssid", ""))
+        services = get_service_statuses()
         return jsonify({
             "frame_current": frame_current,
             "frame_total": frame_total,
@@ -216,6 +303,7 @@ def status():
             "fps": cfg.get("playback_fps", 25),
             "wifi_state": wifi_status["state"],
             "wifi_message": wifi_status["message"],
+            "services": services,
         })
     except Exception:
         log.exception("Status endpoint failed")
