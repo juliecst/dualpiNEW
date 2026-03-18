@@ -412,4 +412,9 @@ def handle_500(exc):
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=False)
+    # Bind to "::" (dual-stack) so the server accepts both IPv4 and IPv6
+    # connections.  On Raspberry Pi OS Bookworm, mDNS (Avahi) clients may
+    # resolve pi2-display.local to an IPv6 link-local address; binding only
+    # to "0.0.0.0" would refuse those connections with a 502 on the caller.
+    log.info("Starting status-api on [::]:5000 (dual-stack IPv4+IPv6)")
+    app.run(host="::", port=5000, debug=False)

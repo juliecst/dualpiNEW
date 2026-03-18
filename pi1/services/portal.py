@@ -11,6 +11,7 @@ import json
 import os
 import glob
 import heapq
+import socket
 import urllib.error
 import urllib.request
 import shutil
@@ -362,38 +363,71 @@ def get_pi2_api_candidates() -> list:
     return candidates
 
 
+def _resolve_host_prefer_ipv4(host: str, port: int) -> list:
+    """Resolve *host* via getaddrinfo, returning (addr, port) pairs with
+    IPv4 addresses listed first.  On Raspberry Pi OS Bookworm, Avahi/mDNS
+    may return an IPv6 link-local address for ``pi2-display.local``; placing
+    IPv4 first avoids 'connection refused' when the remote Flask server is
+    only listening on IPv4 (older setups) while still working when the
+    remote listens on dual-stack.
+    """
+    try:
+        infos = socket.getaddrinfo(host, port, socket.AF_UNSPEC, socket.SOCK_STREAM)
+    except socket.gaierror:
+        return []
+    ipv4 = []
+    ipv6 = []
+    seen = set()
+    for family, _type, _proto, _canon, sockaddr in infos:
+        addr = sockaddr[0]
+        if addr in seen:
+            continue
+        seen.add(addr)
+        if family == socket.AF_INET:
+            ipv4.append((addr, port))
+        elif family == socket.AF_INET6:
+            ipv6.append((addr, port))
+    return ipv4 + ipv6
+
+
 def proxy_pi2_request(path: str, method: str = "GET", payload: dict = None):
     body = json.dumps(payload).encode() if payload is not None else None
     headers = {"Content-Type": "application/json"} if payload is not None else {}
     last_error = "Pi 2 is unreachable."
     tried_hosts = []
     for host in get_pi2_api_candidates():
-        url = f"http://{host}:{PI2_API_PORT}{path}"
         tried_hosts.append(host)
-        try:
-            request_obj = urllib.request.Request(url, data=body, headers=headers, method=method)
-            with urllib.request.urlopen(request_obj, timeout=4) as response:
-                raw = response.read().decode() or "{}"
-                data = json.loads(raw)
-                if isinstance(data, dict):
-                    data.setdefault("pi2_host", host)
-                return data, response.status
-        except urllib.error.HTTPError as exc:
-            # The host responded with an HTTP error. If the body is valid
-            # JSON it is likely Pi 2's status-api — pass it through so the
-            # caller gets the real status code instead of a generic 502.
+        # Resolve the hostname ourselves so we can try IPv4 first (the
+        # status-api on Pi 2 listens on dual-stack, but legacy setups may
+        # only have IPv4).  Also wrap bare IPv6 addresses in brackets for
+        # the URL.
+        resolved_targets = _resolve_host_prefer_ipv4(host, PI2_API_PORT)
+        if not resolved_targets:
+            resolved_targets = [(host, PI2_API_PORT)]
+        for addr, port in resolved_targets:
+            # Wrap raw IPv6 addresses in brackets for HTTP URLs
+            url_host = f"[{addr}]" if ":" in addr else addr
+            url = f"http://{url_host}:{port}{path}"
             try:
-                err_body = exc.read().decode()
-                err_data = json.loads(err_body)
-                if isinstance(err_data, dict):
-                    err_data.setdefault("pi2_host", host)
-                return err_data, exc.code
-            except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
-                # Non-JSON response (e.g. another device on the network) —
-                # skip this candidate and keep trying.
+                request_obj = urllib.request.Request(url, data=body, headers=headers, method=method)
+                with urllib.request.urlopen(request_obj, timeout=4) as response:
+                    raw = response.read().decode() or "{}"
+                    data = json.loads(raw)
+                    if isinstance(data, dict):
+                        data.setdefault("pi2_host", host)
+                    return data, response.status
+            except urllib.error.HTTPError as exc:
+                try:
+                    err_body = exc.read().decode()
+                    err_data = json.loads(err_body)
+                    if isinstance(err_data, dict):
+                        err_data.setdefault("pi2_host", host)
+                    return err_data, exc.code
+                except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+                    last_error = str(exc)
+            except Exception as exc:
                 last_error = str(exc)
-        except Exception as exc:
-            last_error = str(exc)
+    log.debug("proxy_pi2_request failed for %s — tried %s — %s", path, tried_hosts, last_error)
     return {"error": last_error, "tried_hosts": tried_hosts}, 502
 
 

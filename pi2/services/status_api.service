@@ -13,6 +13,8 @@ User=root
 StandardOutput=journal
 StandardError=journal
 Environment=PYTHONUNBUFFERED=1
+# On Bookworm, ensure dual-stack sockets can accept both IPv4 and IPv6
+Environment=FLASK_RUN_HOST=::
 
 [Install]
 WantedBy=multi-user.target
