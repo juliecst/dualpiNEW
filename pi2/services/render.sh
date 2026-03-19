@@ -33,6 +33,8 @@ fi
 
 # Build a flat directory of numbered symlinks from archive + current frames
 RENDER_INPUT="/tmp/timelapse_render_input"
+cleanup() { rm -rf "$RENDER_INPUT"; }
+trap cleanup EXIT
 rm -rf "$RENDER_INPUT"
 mkdir -p "$RENDER_INPUT"
 
@@ -57,7 +59,6 @@ done
 FRAME_COUNT=$COUNTER
 if [[ "$FRAME_COUNT" -lt 2 ]]; then
     log "Only $FRAME_COUNT frames — skipping render"
-    rm -rf "$RENDER_INPUT"
     exit 0
 fi
 
@@ -91,11 +92,8 @@ if [[ -f "$TMP_OUTPUT" ]]; then
     log "Render complete: $OUTPUT"
 else
     log "ERROR: Render failed!"
-    rm -rf "$RENDER_INPUT"
     exit 1
 fi
-
-rm -rf "$RENDER_INPUT"
 
 # Keep only 3 most recent renders (exclude current_preview.mp4)
 cd "$RENDERS_DIR"

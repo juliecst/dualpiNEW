@@ -411,14 +411,14 @@ def proxy_pi2_request(path: str, method: str = "GET", payload: dict = None):
         if not resolved_targets:
             resolved_targets = [(host, PI2_API_PORT, False)]
         for addr, port, is_ipv6 in resolved_targets:
-            if time.time() > deadline:
+            remaining = deadline - time.time()
+            if remaining <= 0:
                 break
             tried_addrs.append(addr)
             # Wrap raw IPv6 addresses in brackets for HTTP URLs
             url_host = f"[{addr}]" if is_ipv6 else addr
             url = f"http://{url_host}:{port}{path}"
-            remaining = max(0.5, deadline - time.time())
-            per_host_timeout = min(3, remaining)
+            per_host_timeout = min(3, max(0.5, remaining))
             try:
                 request_obj = urllib.request.Request(url, data=body, headers=headers, method=method)
                 with urllib.request.urlopen(request_obj, timeout=per_host_timeout) as response:
