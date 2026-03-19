@@ -1,0 +1,26 @@
+[Unit]
+Description=Pi1 Timelapse Slideshow — mpv fullscreen playback
+After=graphical.target grabber.service
+Wants=grabber.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/mpv \
+    --fullscreen \
+    --loop-playlist=inf \
+    --image-display-duration=0.2 \
+    --no-audio \
+    --no-osc \
+    --no-input-default-bindings \
+    --really-quiet \
+    --gpu-context=drm \
+    /data/timelapse/current/*/*.jpg
+Restart=always
+RestartSec=15
+SupplementaryGroups=video render
+Environment=XDG_RUNTIME_DIR=/run/user/0
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

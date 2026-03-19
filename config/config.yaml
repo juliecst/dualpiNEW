@@ -1,0 +1,48 @@
+# Timelapse HQ — Shared Configuration Defaults
+# This file is read by both Pi1 (grabber, portal) and Pi2 (camera_server).
+# On Pi1, a copy lives at /data/config.yaml and is the source of truth.
+
+# --- Capture Settings (Pi2) ---
+capture:
+  interval_seconds: 5          # Seconds between captures
+  width: 4056                  # Sensor width in pixels
+  height: 3040                 # Sensor height in pixels
+  quality: 95                  # JPEG quality (1-100)
+  timeout_ms: 1000             # rpicam-still --timeout value
+  extra_args: ""               # Additional rpicam-still flags (optional)
+
+# --- Grabber Settings (Pi1) ---
+grabber:
+  poll_interval_seconds: 5     # How often Pi1 fetches from Pi2
+  pi2_url: "http://192.168.50.20:8080/latest.jpg"
+  output_dir: "/data/timelapse/current"
+  request_timeout_seconds: 10  # HTTP request timeout
+
+# --- Playback Settings (Pi1) ---
+playback:
+  fps: 25                       # Frames per second for mpv slideshow
+  display_type: "hdmi"          # "hdmi" or "spi"
+  brightness: 100               # Display brightness (0-100)
+
+# --- Backup Settings (Pi1) ---
+backup:
+  source: "/data/timelapse/"
+  destination: "/backup/"
+  schedule: "03:00"             # Daily backup time (used by systemd timer)
+
+# --- Network / WiFi AP (Pi1) ---
+network:
+  ap_ssid: "timelapse-ap"
+  ap_password: "changeme2"
+  ap_channel: 7
+  subnet: "192.168.50.0/24"
+  pi1_ip: "192.168.50.1"
+  pi2_ip: "192.168.50.20"
+  dhcp_range_start: "192.168.50.10"
+  dhcp_range_end: "192.168.50.50"
+
+# --- Admin Portal (Pi1, optional) ---
+portal:
+  enabled: true
+  port: 80
+  admin_password: "changeme"

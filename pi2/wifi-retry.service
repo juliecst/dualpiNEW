@@ -1,0 +1,24 @@
+[Unit]
+Description=Pi2 WiFi Client Retry — reconnects to Pi1 AP on failure
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+ExecStart=/bin/bash -c '\
+  while true; do \
+    if ! ip route get 192.168.50.1 >/dev/null 2>&1; then \
+      echo "$(date): WiFi not connected, attempting reconnect..."; \
+      nmcli device wifi rescan 2>/dev/null || true; \
+      nmcli device wifi connect "timelapse-ap" 2>/dev/null || \
+        wpa_cli -i wlan0 reconfigure 2>/dev/null || true; \
+    fi; \
+    sleep 15; \
+  done'
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
