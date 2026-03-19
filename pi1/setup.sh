@@ -21,6 +21,7 @@ apt-get install -y --no-install-recommends \
     rpicam-apps \
     hostapd \
     dnsmasq \
+    dhcpcd5 \
     python3 \
     python3-yaml \
     python3-pip
@@ -79,6 +80,11 @@ unmanaged-devices=interface-name:wlan0
 NMEOF
     systemctl reload NetworkManager 2>/dev/null || systemctl restart NetworkManager
     echo "  NetworkManager: wlan0 set to unmanaged"
+
+    # Disable dhcpcd service to prevent conflicts with ap-network.service
+    systemctl stop dhcpcd 2>/dev/null || true
+    systemctl disable dhcpcd 2>/dev/null || true
+    echo "  dhcpcd disabled (ap-network.service manages wlan0 static IP)"
 fi
 
 # Deploy hostapd config with credentials from config.yaml

@@ -21,6 +21,7 @@ apt-get update -qq
 apt-get install -y --no-install-recommends \
     mpv \
     rsync \
+    dhcpcd5 \
     python3 \
     python3-yaml \
     python3-flask \
@@ -88,6 +89,11 @@ fi
 
 # On Bookworm, NetworkManager is the default. Use nmcli for WiFi client config.
 if systemctl is-active --quiet NetworkManager 2>/dev/null; then
+    # Disable dhcpcd service to prevent conflicts with NetworkManager
+    systemctl stop dhcpcd 2>/dev/null || true
+    systemctl disable dhcpcd 2>/dev/null || true
+    echo "  dhcpcd disabled (NetworkManager manages WiFi)"
+
     nmcli connection delete "$WIFI_SSID" 2>/dev/null || true
     nmcli connection add type wifi con-name "$WIFI_SSID" \
         wifi.ssid "$WIFI_SSID" \
@@ -102,6 +108,9 @@ if systemctl is-active --quiet NetworkManager 2>/dev/null; then
     echo "  WiFi configured via NetworkManager for SSID: $WIFI_SSID"
 else
     # Fall back to wpa_supplicant + dhcpcd (non-Bookworm or Lite without NM)
+    # Enable dhcpcd service for static IP management
+    systemctl enable dhcpcd 2>/dev/null || true
+
     WPA_CONF="/etc/wpa_supplicant/wpa_supplicant.conf"
     cat > "$WPA_CONF" <<EOF
 ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev
