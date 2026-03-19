@@ -3,6 +3,13 @@
 # Monitors disk usage and sets a warning flag file if usage exceeds threshold.
 # Intended to be run via cron (e.g., every 6 hours).
 # Uses hysteresis: sets flag at 85%, clears at 80%.
+#
+# Usage: disk_monitor.sh [MOUNT_POINT]
+#   MOUNT_POINT  Path to monitor (default: /data)
+#
+# Examples:
+#   disk_monitor.sh            # Monitor /data
+#   disk_monitor.sh /backup    # Monitor /backup
 set -euo pipefail
 
 MOUNT_POINT="${1:-/data}"

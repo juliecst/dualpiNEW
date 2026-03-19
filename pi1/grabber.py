@@ -65,7 +65,8 @@ def fetch_and_save(pi2_url: str, output_dir: str, timeout: int) -> bool:
     day_dir = os.path.join(output_dir, now.strftime("%Y-%m-%d"))
     os.makedirs(day_dir, exist_ok=True)
 
-    filename = now.strftime("%H-%M-%S") + ".jpg"
+    # Include fractional seconds to avoid collisions with sub-second intervals
+    filename = now.strftime("%H-%M-%S") + f"-{now.microsecond // 1000:03d}.jpg"
     final_path = os.path.join(day_dir, filename)
     tmp_path = final_path + ".tmp"
 

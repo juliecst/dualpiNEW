@@ -28,7 +28,7 @@ playback:
 backup:
   source: "/data/timelapse/"
   destination: "/backup/"
-  schedule: "03:00"             # Daily backup time (used by systemd timer)
+  schedule: "03:00"             # Informational; actual schedule is in pi1/backup.timer
 
 # --- Network / WiFi AP (Pi1) ---
 network:

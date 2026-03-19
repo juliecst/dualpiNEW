@@ -30,8 +30,9 @@ fi
 log "Starting daily backup: $SOURCE → $DEST"
 
 # Run rsync (archive, verbose, update only newer files)
-if rsync -av --update "$SOURCE" "${DEST}timelapse/"; then
-    echo "$DATE $(date +%H:%M:%S)" > "${DEST}last_backup.txt"
+DEST_DIR="${DEST%/}/timelapse/"
+if rsync -av --update "$SOURCE" "$DEST_DIR"; then
+    echo "$DATE $(date +%H:%M:%S)" > "${DEST%/}/last_backup.txt"
     log "Backup complete: $DATE"
 else
     log "ERROR: rsync failed with exit code $?"

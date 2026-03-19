@@ -125,7 +125,7 @@ def capture_loop() -> None:
 class CameraHandler(BaseHTTPRequestHandler):
     """Minimal HTTP handler serving latest.jpg and health endpoint."""
 
-    def do_GET(self):  # noqa: N802
+    def do_GET(self):  # noqa: N802 — required by BaseHTTPRequestHandler interface
         if self.path == "/latest.jpg":
             self._serve_image()
         elif self.path == "/health":
