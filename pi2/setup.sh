@@ -38,6 +38,9 @@ fi
 # --- 3. Configure WiFi client ---
 echo "[3/5] Configuring WiFi client..."
 
+# Ensure WiFi radio is unblocked
+rfkill unblock wifi 2>/dev/null || true
+
 # Read AP credentials from config (with fallback defaults)
 WIFI_SSID="timelapse-ap"
 WIFI_PASS="changeme2"
@@ -56,9 +59,24 @@ print(c.get('network', {}).get('ap_password', 'changeme2'))
 " 2>/dev/null || echo "changeme2")
 fi
 
-# Configure wpa_supplicant for WiFi client mode
-WPA_CONF="/etc/wpa_supplicant/wpa_supplicant.conf"
-cat > "$WPA_CONF" <<EOF
+# On Bookworm, NetworkManager is the default. Use nmcli for WiFi client config.
+if systemctl is-active --quiet NetworkManager 2>/dev/null; then
+    nmcli connection delete "$WIFI_SSID" 2>/dev/null || true
+    nmcli connection add type wifi con-name "$WIFI_SSID" \
+        wifi.ssid "$WIFI_SSID" \
+        wifi-sec.key-mgmt wpa-psk \
+        wifi-sec.psk "$WIFI_PASS" \
+        ipv4.method manual \
+        ipv4.addresses "192.168.50.20/24" \
+        ipv4.gateway "192.168.50.1" \
+        ipv4.dns "192.168.50.1" \
+        connection.autoconnect yes \
+        connection.autoconnect-priority 100
+    echo "  WiFi configured via NetworkManager for SSID: $WIFI_SSID"
+else
+    # Fall back to wpa_supplicant + dhcpcd (non-Bookworm or Lite without NM)
+    WPA_CONF="/etc/wpa_supplicant/wpa_supplicant.conf"
+    cat > "$WPA_CONF" <<EOF
 ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev
 update_config=1
 country=US
@@ -70,13 +88,13 @@ network={
     priority=1
 }
 EOF
-chmod 600 "$WPA_CONF"
-echo "  WiFi configured for SSID: $WIFI_SSID"
+    chmod 600 "$WPA_CONF"
+    echo "  WiFi configured via wpa_supplicant for SSID: $WIFI_SSID"
 
-# Set static IP for wlan0 via dhcpcd
-DHCPCD_CONF="/etc/dhcpcd.conf"
-if ! grep -q "interface wlan0" "$DHCPCD_CONF" 2>/dev/null; then
-    cat >> "$DHCPCD_CONF" <<EOF
+    # Set static IP for wlan0 via dhcpcd
+    DHCPCD_CONF="/etc/dhcpcd.conf"
+    if ! grep -q "interface wlan0" "$DHCPCD_CONF" 2>/dev/null; then
+        cat >> "$DHCPCD_CONF" <<EOF
 
 # Pi2 static IP on timelapse AP network
 interface wlan0
@@ -84,7 +102,8 @@ static ip_address=192.168.50.20/24
 static routers=192.168.50.1
 static domain_name_servers=192.168.50.1
 EOF
-    echo "  Static IP 192.168.50.20 configured"
+        echo "  Static IP 192.168.50.20 configured via dhcpcd"
+    fi
 fi
 
 # --- 4. Install systemd services ---
