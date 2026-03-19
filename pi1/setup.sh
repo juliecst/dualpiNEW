@@ -67,6 +67,9 @@ mkdir -p /data/timelapse/current
 # --- 4. Configure WiFi Access Point ---
 echo "[4/7] Configuring WiFi AP (hostapd + dnsmasq)..."
 
+# Ensure WiFi radio is unblocked
+rfkill unblock wifi 2>/dev/null || true
+
 # Read AP settings from config
 AP_SSID="timelapse-ap"
 AP_PASS="changeme2"
@@ -90,6 +93,18 @@ with open('$CONFIG_DIR/config.yaml') as f:
     c = yaml.safe_load(f)
 print(c.get('network', {}).get('ap_channel', 7))
 " 2>/dev/null || echo "7")
+fi
+
+# On Bookworm, NetworkManager is the default. Tell it to ignore wlan0
+# so hostapd can manage the AP interface directly.
+if systemctl is-active --quiet NetworkManager 2>/dev/null; then
+    mkdir -p /etc/NetworkManager/conf.d
+    cat > /etc/NetworkManager/conf.d/99-unmanaged-wlan0.conf <<'NMEOF'
+[keyfile]
+unmanaged-devices=interface-name:wlan0
+NMEOF
+    systemctl reload NetworkManager 2>/dev/null || systemctl restart NetworkManager
+    echo "  NetworkManager: wlan0 set to unmanaged"
 fi
 
 # Deploy hostapd config with credentials from config.yaml

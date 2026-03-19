@@ -29,6 +29,7 @@ A modern, reliable, air-gapped timelapse capture and display system using two Ra
 - **Atomic writes** — temp file + rename for all JPEG saves to survive power cuts
 - **Session-based** — new calendar day = new subfolder, no manual intervention needed
 - **Raspberry Pi OS Bookworm 64-bit**, `rpicam-still` (not legacy `raspistill`)
+- **Pi 3 AP host** — 2.4 GHz 802.11n only; Pi 4 camera node connects as WiFi client
 
 ## Repository Structure
 
@@ -67,7 +68,7 @@ timelapse-hq-fork/
 
 | Function | Details |
 |----------|---------|
-| WiFi AP | `timelapse-ap`, subnet `192.168.50.0/24`, WPA2, password configurable |
+| WiFi AP | `timelapse-ap`, subnet `192.168.50.0/24`, WPA2, 2.4 GHz only (Pi 3 limitation), password configurable |
 | Image Grabber | Every N seconds (default: 5): fetches `http://192.168.50.20:8080/latest.jpg`, saves as `/data/timelapse/current/YYYY-MM-DD/HH-MM-SS.jpg` |
 | Playback | `mpv` fullscreen slideshow on Waveshare round display |
 | Backup | Daily `rsync` from `/data/timelapse/` to second USB stick at `/backup/` |
@@ -89,7 +90,8 @@ timelapse-hq-fork/
 
 ### Prerequisites
 
-- 2× Raspberry Pi 4 (or 5) with Raspberry Pi OS Bookworm 64-bit
+- 1× Raspberry Pi 3 (Pi1 — Display + AP) with Raspberry Pi OS Bookworm 64-bit
+- 1× Raspberry Pi 4 (Pi2 — Camera) with Raspberry Pi OS Bookworm 64-bit
 - 1× Raspberry Pi HQ Camera (or Camera Module 3) attached to Pi2
 - 1–2× USB sticks (exFAT formatted) for Pi1 storage
 - 1× Display (HDMI or Waveshare round) connected to Pi1

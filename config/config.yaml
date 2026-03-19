@@ -1,6 +1,11 @@
 # Timelapse HQ — Shared Configuration Defaults
 # This file is read by both Pi1 (grabber, portal) and Pi2 (camera_server).
 # On Pi1, a copy lives at /data/config.yaml and is the source of truth.
+#
+# Hardware:
+#   Pi1 (Display + AP) = Raspberry Pi 3   — 2.4 GHz WiFi only
+#   Pi2 (Camera)       = Raspberry Pi 4
+#   Both run Raspberry Pi OS Bookworm 64-bit
 
 # --- Capture Settings (Pi2) ---
 capture:
