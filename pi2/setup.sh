@@ -320,6 +320,7 @@ mkdir -p /data/cache /data/renders /mnt/timelapse
 # 5. Mount Pi 1's Samba share
 ###############################################################################
 info "Configuring Samba mount…"
+info "Pi 2 is a Samba/CIFS client only — no local samba.service is expected here."
 
 # Create credentials file for Samba guest mount (avoids fstab inline creds)
 cat > /etc/samba/pi1_credentials <<'EOF'
@@ -523,4 +524,6 @@ info " Pi 2 (Display Pi) setup complete!"
 info " IP:         192.168.50.20"
 info " Status API: http://192.168.50.20:5000/status"
 info " Samba mount: /mnt/timelapse"
+info " Local cache: /data/cache  (USB stick if mounted at /data, else SD card)"
+info " Sync check:  systemctl status sync.service && ls /data/cache"
 info "═══════════════════════════════════════════════════════"
