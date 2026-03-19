@@ -1,0 +1,17 @@
+[Unit]
+Description=Pi1 Admin Portal — Flask web dashboard on port 80
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/timelapse/portal.py
+Restart=always
+RestartSec=10
+Environment=CONFIG_PATH=/data/config.yaml
+Environment=PORTAL_PORT=80
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

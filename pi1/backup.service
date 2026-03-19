@@ -1,0 +1,9 @@
+[Unit]
+Description=Pi1 Daily Timelapse Backup
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/timelapse/backup.sh
+StandardOutput=journal
+StandardError=journal

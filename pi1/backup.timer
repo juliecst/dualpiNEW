@@ -1,0 +1,11 @@
+[Unit]
+Description=Pi1 Daily Timelapse Backup Timer
+Persistent=true
+
+[Timer]
+OnCalendar=*-*-* 03:00:00
+RandomizedDelaySec=300
+Unit=backup.service
+
+[Install]
+WantedBy=timers.target

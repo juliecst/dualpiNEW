@@ -1,0 +1,36 @@
+[Unit]
+Description=Pi1 Timelapse Slideshow — mpv fullscreen playback
+After=graphical.target grabber.service
+Wants=grabber.service
+
+[Service]
+Type=simple
+# Wait for at least one frame to exist before starting mpv.
+# Uses a shell wrapper to handle missing directories gracefully.
+ExecStartPre=/bin/bash -c '\
+    echo "Waiting for first frame..."; \
+    while ! find /data/timelapse/current -name "*.jpg" -print -quit 2>/dev/null | grep -q .; do \
+        sleep 5; \
+    done; \
+    echo "Frames found, starting playback"'
+ExecStart=/bin/bash -c '\
+    find /data/timelapse/current -name "*.jpg" -type f | sort > /tmp/timelapse_playlist.txt && \
+    exec /usr/bin/mpv \
+        --fullscreen \
+        --loop-playlist=inf \
+        --image-display-duration=0.2 \
+        --no-audio \
+        --no-osc \
+        --no-input-default-bindings \
+        --really-quiet \
+        --gpu-context=drm \
+        --playlist=/tmp/timelapse_playlist.txt'
+Restart=always
+RestartSec=15
+SupplementaryGroups=video render
+Environment=XDG_RUNTIME_DIR=/run/user/0
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

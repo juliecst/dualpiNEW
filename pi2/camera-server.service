@@ -1,0 +1,17 @@
+[Unit]
+Description=Pi2 Camera Capture + HTTP Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/timelapse/camera_server.py
+Restart=always
+RestartSec=10
+Environment=CONFIG_PATH=/data/config.yaml
+Environment=HTTP_PORT=8080
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

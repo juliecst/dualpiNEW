@@ -1,0 +1,16 @@
+[Unit]
+Description=Pi1 Image Grabber — polls Pi2 camera server for latest JPEG
+After=network-online.target hostapd.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/timelapse/grabber.py
+Restart=always
+RestartSec=10
+Environment=CONFIG_PATH=/data/config.yaml
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
