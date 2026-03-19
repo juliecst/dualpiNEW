@@ -29,6 +29,7 @@ log = logging.getLogger("status-api")
 app = Flask(__name__)
 
 LOCAL_CACHE = "/data/cache"
+LOCAL_ARCHIVE = os.path.join(LOCAL_CACHE, "archive")
 LAST_SYNC_FILE = "/data/last_sync.txt"
 SYNC_HEARTBEAT_FILE = "/data/sync_heartbeat.txt"
 MPV_SOCKET = "/tmp/mpv-socket"
@@ -40,16 +41,16 @@ SYNC_HEARTBEAT_MAX_AGE = 300  # seconds — sync should heartbeat at least every
 
 def read_config() -> dict:
     defaults = {"playback_fps": 25, "display_brightness": 100, "wifi_ssid": "timelapse-ap"}
-    for path in ["/mnt/timelapse/../config.json", CONFIG_LOCAL]:
-        try:
-            real = os.path.realpath(path)
-            with open(real) as f:
-                cfg = json.load(f)
-            for k, v in defaults.items():
-                cfg.setdefault(k, v)
-            return cfg
-        except Exception:
-            continue
+    # Read from local config only to avoid hanging on a stale CIFS mount
+    # (playback.py caches the remote config locally when it can reach it).
+    try:
+        with open(CONFIG_LOCAL) as f:
+            cfg = json.load(f)
+        for k, v in defaults.items():
+            cfg.setdefault(k, v)
+        return cfg
+    except Exception:
+        pass
     return defaults
 
 
@@ -85,17 +86,28 @@ def get_disk_usage() -> tuple:
 
 
 def get_frame_info() -> tuple:
-    """Return (current_frame_number, total_frames)."""
-    frames = sorted(glob.glob(os.path.join(LOCAL_CACHE, "frame_*.jpg")))
-    total = len(frames)
-    current = 0
-    if frames:
+    """Return (current_frame_number, total_frames) including archive sessions."""
+    # Current session frames
+    current_frames = sorted(glob.glob(os.path.join(LOCAL_CACHE, "frame_*.jpg")))
+    current_count = len(current_frames)
+    current_number = 0
+    if current_frames:
         try:
-            base = os.path.basename(frames[-1])
-            current = int(base.replace("frame_", "").replace(".jpg", ""))
+            base = os.path.basename(current_frames[-1])
+            current_number = int(base.replace("frame_", "").replace(".jpg", ""))
         except ValueError:
-            current = total
-    return current, total
+            current_number = current_count
+
+    # Archive frames
+    archive_count = 0
+    if os.path.isdir(LOCAL_ARCHIVE):
+        for session_name in os.listdir(LOCAL_ARCHIVE):
+            session_dir = os.path.join(LOCAL_ARCHIVE, session_name)
+            if os.path.isdir(session_dir):
+                archive_count += len(glob.glob(os.path.join(session_dir, "frame_*.jpg")))
+
+    total = archive_count + current_count
+    return current_number, total
 
 
 def get_session_id() -> str:

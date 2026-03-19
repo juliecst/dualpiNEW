@@ -396,7 +396,12 @@ def proxy_pi2_request(path: str, method: str = "GET", payload: dict = None):
     last_error = "Pi 2 is unreachable."
     tried_hosts = []
     tried_addrs = []
+    # Overall deadline keeps total proxy time under the JS polling timeout
+    # (8 s) even when many candidate hosts are tried.
+    deadline = time.time() + 6
     for host in get_pi2_api_candidates():
+        if time.time() > deadline:
+            break
         tried_hosts.append(host)
         # Resolve the hostname ourselves so we can try IPv4 first (the
         # status-api on Pi 2 listens on dual-stack, but legacy setups may
@@ -406,13 +411,17 @@ def proxy_pi2_request(path: str, method: str = "GET", payload: dict = None):
         if not resolved_targets:
             resolved_targets = [(host, PI2_API_PORT, False)]
         for addr, port, is_ipv6 in resolved_targets:
+            if time.time() > deadline:
+                break
             tried_addrs.append(addr)
             # Wrap raw IPv6 addresses in brackets for HTTP URLs
             url_host = f"[{addr}]" if is_ipv6 else addr
             url = f"http://{url_host}:{port}{path}"
+            remaining = max(0.5, deadline - time.time())
+            per_host_timeout = min(3, remaining)
             try:
                 request_obj = urllib.request.Request(url, data=body, headers=headers, method=method)
-                with urllib.request.urlopen(request_obj, timeout=4) as response:
+                with urllib.request.urlopen(request_obj, timeout=per_host_timeout) as response:
                     raw = response.read().decode() or "{}"
                     data = json.loads(raw)
                     if isinstance(data, dict):

@@ -15,6 +15,7 @@ Supports both HDMI and DRM/KMS (Waveshare round SPI) displays.
 import json
 import glob
 import os
+import shutil
 import subprocess
 import time
 import signal
@@ -30,6 +31,7 @@ logging.basicConfig(
 log = logging.getLogger("playback")
 
 LOCAL_CACHE = "/data/cache"
+LOCAL_ARCHIVE = os.path.join(LOCAL_CACHE, "archive")
 RENDERS_DIR = "/data/renders"
 PLAYLIST_PATH = "/tmp/timelapse_playlist.txt"
 MPV_SOCKET = "/tmp/mpv-socket"
@@ -69,8 +71,20 @@ def read_config() -> dict:
 
 
 def get_sorted_frames() -> list:
-    """Return sorted list of frame paths in cache."""
-    frames = sorted(glob.glob(os.path.join(LOCAL_CACHE, "frame_*.jpg")))
+    """Return sorted list of all frame paths (archive sessions first, then current).
+
+    Archive sessions are sorted by session directory name (which is
+    date-based) so frames play back in chronological order.
+    """
+    frames = []
+    # Archived sessions come first
+    if os.path.isdir(LOCAL_ARCHIVE):
+        for session_name in sorted(os.listdir(LOCAL_ARCHIVE)):
+            session_dir = os.path.join(LOCAL_ARCHIVE, session_name)
+            if os.path.isdir(session_dir):
+                frames.extend(sorted(glob.glob(os.path.join(session_dir, "frame_*.jpg"))))
+    # Current session frames follow
+    frames.extend(sorted(glob.glob(os.path.join(LOCAL_CACHE, "frame_*.jpg"))))
     return frames
 
 
@@ -228,12 +242,21 @@ def render_preview(fps: int) -> str:
     with open(RENDERING_FLAG, "w") as f:
         f.write("rendering")
 
+    # Build a temp directory with numbered symlinks so ffmpeg can use glob
+    render_input = "/tmp/timelapse_render_input"
     try:
+        if os.path.isdir(render_input):
+            shutil.rmtree(render_input)
+        os.makedirs(render_input)
+        for i, frame in enumerate(frames, 1):
+            os.symlink(os.path.abspath(frame),
+                        os.path.join(render_input, f"frame_{i:06d}.jpg"))
+
         cmd = [
             "ffmpeg", "-y",
             "-framerate", str(fps),
             "-pattern_type", "glob",
-            "-i", os.path.join(LOCAL_CACHE, "frame_*.jpg"),
+            "-i", os.path.join(render_input, "frame_*.jpg"),
             "-vf", "deflicker=mode=pm:size=10",
             "-c:v", "libx264",
             "-preset", "fast",
@@ -259,6 +282,8 @@ def render_preview(fps: int) -> str:
             os.remove(tmp_output)
         if os.path.exists(RENDERING_FLAG):
             os.remove(RENDERING_FLAG)
+        if os.path.isdir(render_input):
+            shutil.rmtree(render_input)
 
 
 def wait_for_frames():
