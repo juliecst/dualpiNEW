@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Pi1 — Grabber
-Main loop: every N seconds, HTTP-fetch the latest JPEG from Pi2's camera server
+Pi2 — Grabber
+Main loop: every N seconds, HTTP-fetch the latest JPEG from Pi1's camera server
 and save it as a timestamped file under /data/timelapse/current/YYYY-MM-DD/.
 
 Features:
   - Atomic writes (temp file + rename)
   - Auto-creates daily subdirectories
-  - Configurable poll interval and Pi2 URL
+  - Configurable poll interval and Pi1 URL
   - Resilient: logs errors and retries on next cycle
 """
 
@@ -26,7 +26,7 @@ import yaml
 # ---------------------------------------------------------------------------
 CONFIG_PATH = os.environ.get("CONFIG_PATH", "/data/config.yaml")
 DEFAULT_POLL_INTERVAL = 5
-DEFAULT_PI2_URL = "http://192.168.50.20:8080/latest.jpg"
+DEFAULT_PI1_URL = "http://192.168.50.1:8080/latest.jpg"
 DEFAULT_OUTPUT_DIR = "/data/timelapse/current"
 DEFAULT_TIMEOUT = 10
 
@@ -41,7 +41,7 @@ def load_config() -> dict:
     """Load grabber settings from config.yaml, with safe defaults."""
     defaults = {
         "poll_interval_seconds": DEFAULT_POLL_INTERVAL,
-        "pi2_url": DEFAULT_PI2_URL,
+        "pi1_url": DEFAULT_PI1_URL,
         "output_dir": DEFAULT_OUTPUT_DIR,
         "request_timeout_seconds": DEFAULT_TIMEOUT,
     }
@@ -59,8 +59,8 @@ def load_config() -> dict:
     return defaults
 
 
-def fetch_and_save(pi2_url: str, output_dir: str, timeout: int) -> bool:
-    """Fetch latest.jpg from Pi2 and save with timestamp. Returns True on success."""
+def fetch_and_save(pi1_url: str, output_dir: str, timeout: int) -> bool:
+    """Fetch latest.jpg from Pi1 and save with timestamp. Returns True on success."""
     now = datetime.now()
     day_dir = os.path.join(output_dir, now.strftime("%Y-%m-%d"))
     os.makedirs(day_dir, exist_ok=True)
@@ -71,7 +71,7 @@ def fetch_and_save(pi2_url: str, output_dir: str, timeout: int) -> bool:
     tmp_path = final_path + ".tmp"
 
     try:
-        response = urlopen(pi2_url, timeout=timeout)
+        response = urlopen(pi1_url, timeout=timeout)
         data = response.read()
 
         if len(data) < 1000:
@@ -101,24 +101,24 @@ def fetch_and_save(pi2_url: str, output_dir: str, timeout: int) -> bool:
 
 
 def main() -> None:
-    log.info("Pi1 Grabber starting")
+    log.info("Pi2 Grabber starting")
     consecutive_failures = 0
 
     while True:
         cfg = load_config()
         interval = max(1, int(cfg["poll_interval_seconds"]))
-        pi2_url = cfg["pi2_url"]
+        pi1_url = cfg["pi1_url"]
         output_dir = cfg["output_dir"]
         timeout = int(cfg["request_timeout_seconds"])
 
-        success = fetch_and_save(pi2_url, output_dir, timeout)
+        success = fetch_and_save(pi1_url, output_dir, timeout)
         if success:
             consecutive_failures = 0
         else:
             consecutive_failures += 1
             if consecutive_failures % 12 == 0:  # Every ~60s at 5s interval
                 log.warning(
-                    "Pi2 unreachable for %d consecutive attempts",
+                    "Pi1 unreachable for %d consecutive attempts",
                     consecutive_failures,
                 )
 

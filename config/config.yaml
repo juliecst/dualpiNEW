@@ -1,13 +1,13 @@
 # Timelapse HQ — Shared Configuration Defaults
-# This file is read by both Pi1 (grabber, portal) and Pi2 (camera_server).
-# On Pi1, a copy lives at /data/config.yaml and is the source of truth.
+# This file is read by both Pi1 (camera_server) and Pi2 (grabber, portal).
+# On Pi2, a copy lives at /data/config.yaml and is the source of truth.
 #
 # Hardware:
-#   Pi1 (Display + AP) = Raspberry Pi 3   — 2.4 GHz WiFi only
-#   Pi2 (Camera)       = Raspberry Pi 4
+#   Pi1 (Camera + AP) = Raspberry Pi 3   — 2.4 GHz WiFi only
+#   Pi2 (Display)     = Raspberry Pi 4
 #   Both run Raspberry Pi OS Bookworm 64-bit
 
-# --- Capture Settings (Pi2) ---
+# --- Capture Settings (Pi1) ---
 capture:
   interval_seconds: 5          # Seconds between captures
   width: 4056                  # Sensor width in pixels
@@ -16,24 +16,24 @@ capture:
   timeout_ms: 1000             # rpicam-still --timeout value
   extra_args: ""               # Additional rpicam-still flags (optional)
 
-# --- Grabber Settings (Pi1) ---
+# --- Grabber Settings (Pi2) ---
 grabber:
-  poll_interval_seconds: 5     # How often Pi1 fetches from Pi2
-  pi2_url: "http://192.168.50.20:8080/latest.jpg"
+  poll_interval_seconds: 5     # How often Pi2 fetches from Pi1
+  pi1_url: "http://192.168.50.1:8080/latest.jpg"
   output_dir: "/data/timelapse/current"
   request_timeout_seconds: 10  # HTTP request timeout
 
-# --- Playback Settings (Pi1) ---
+# --- Playback Settings (Pi2) ---
 playback:
   fps: 25                       # Frames per second for mpv slideshow
   display_type: "hdmi"          # "hdmi" or "spi"
   brightness: 100               # Display brightness (0-100)
 
-# --- Backup Settings (Pi1) ---
+# --- Backup Settings (Pi2) ---
 backup:
   source: "/data/timelapse/"
   destination: "/backup/"
-  schedule: "03:00"             # Informational; actual schedule is in pi1/backup.timer
+  schedule: "03:00"             # Informational; actual schedule is in pi2/backup.timer
 
 # --- Network / WiFi AP (Pi1) ---
 network:
@@ -46,7 +46,7 @@ network:
   dhcp_range_start: "192.168.50.10"
   dhcp_range_end: "192.168.50.50"
 
-# --- Admin Portal (Pi1, optional) ---
+# --- Admin Portal (Pi2, optional) ---
 portal:
   enabled: true
   port: 80

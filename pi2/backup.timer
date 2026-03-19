@@ -1,5 +1,5 @@
 [Unit]
-Description=Pi1 Daily Timelapse Backup Timer
+Description=Pi2 Daily Timelapse Backup Timer
 Persistent=true
 
 [Timer]

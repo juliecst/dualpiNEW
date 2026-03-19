@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# Pi2 — Camera Node Setup (Idempotent)
+# Pi2 — Display + Brain Setup (Idempotent)
 # Run as root on a fresh Raspberry Pi OS Bookworm 64-bit install.
 # This script:
-#   1. Installs rpicam-apps and Python dependencies
-#   2. Configures WiFi client to connect to Pi1's AP
-#   3. Deploys and enables systemd services
+#   1. Installs all dependencies (mpv, rsync, flask, etc.)
+#   2. Detects and optionally formats USB sticks for /data and /backup
+#   3. Configures WiFi client to connect to Pi1's AP
+#   4. Deploys and enables all systemd services
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -12,22 +13,29 @@ REPO_DIR="$(dirname "$SCRIPT_DIR")"
 INSTALL_DIR="/opt/timelapse"
 CONFIG_DIR="/data"
 
-echo "=== Pi2 Camera Node Setup ==="
+echo "=== Pi2 Display + Brain Setup ==="
 
 # --- 1. System packages ---
-echo "[1/5] Installing system packages..."
+echo "[1/7] Installing system packages..."
 apt-get update -qq
 apt-get install -y --no-install-recommends \
-    rpicam-apps \
+    mpv \
+    rsync \
     python3 \
     python3-yaml \
-    python3-pip
+    python3-flask \
+    python3-pip \
+    usbutils
 
 # --- 2. Deploy application files ---
-echo "[2/5] Deploying application files..."
+echo "[2/7] Deploying application files..."
 mkdir -p "$INSTALL_DIR" "$CONFIG_DIR"
-cp "$SCRIPT_DIR/camera_server.py" "$INSTALL_DIR/camera_server.py"
-chmod +x "$INSTALL_DIR/camera_server.py"
+cp "$SCRIPT_DIR/grabber.py" "$INSTALL_DIR/grabber.py"
+cp "$SCRIPT_DIR/backup.sh" "$INSTALL_DIR/backup.sh"
+cp "$SCRIPT_DIR/portal/portal.py" "$INSTALL_DIR/portal.py"
+cp "$REPO_DIR/common/disk_monitor.sh" "$INSTALL_DIR/disk_monitor.sh"
+chmod +x "$INSTALL_DIR/grabber.py" "$INSTALL_DIR/backup.sh" \
+         "$INSTALL_DIR/portal.py" "$INSTALL_DIR/disk_monitor.sh"
 
 # Deploy default config if none exists
 if [ ! -f "$CONFIG_DIR/config.yaml" ]; then
@@ -35,8 +43,27 @@ if [ ! -f "$CONFIG_DIR/config.yaml" ]; then
     echo "  Deployed default config.yaml"
 fi
 
-# --- 3. Configure WiFi client ---
-echo "[3/5] Configuring WiFi client..."
+# --- 3. USB storage setup ---
+echo "[3/7] Setting up USB storage..."
+mkdir -p /data /backup
+
+# Check for USB devices and provide guidance
+USB_DEVS=$(lsblk -dpno NAME,TRAN 2>/dev/null | grep usb | awk '{print $1}' || true)
+if [ -n "$USB_DEVS" ]; then
+    echo "  Found USB devices: $USB_DEVS"
+    echo "  Mount them to /data and /backup as needed."
+    echo "  Example fstab entries:"
+    echo "    UUID=<data-usb-uuid>   /data   exfat defaults,nofail,uid=1000,gid=1000 0 0"
+    echo "    UUID=<backup-usb-uuid> /backup exfat defaults,nofail,uid=1000,gid=1000 0 0"
+else
+    echo "  No USB devices found. /data will use SD card."
+fi
+
+# Create timelapse directories
+mkdir -p /data/timelapse/current
+
+# --- 4. Configure WiFi client ---
+echo "[4/7] Configuring WiFi client..."
 
 # Ensure WiFi radio is unblocked
 rfkill unblock wifi 2>/dev/null || true
@@ -106,25 +133,44 @@ EOF
     fi
 fi
 
-# --- 4. Install systemd services ---
-echo "[4/5] Installing systemd services..."
-cp "$SCRIPT_DIR/camera-server.service" /etc/systemd/system/
+# --- 5. Install systemd services ---
+echo "[5/7] Installing systemd services..."
+cp "$SCRIPT_DIR/grabber.service" /etc/systemd/system/
+cp "$SCRIPT_DIR/playback.service" /etc/systemd/system/
+cp "$SCRIPT_DIR/backup.service" /etc/systemd/system/
+cp "$SCRIPT_DIR/backup.timer" /etc/systemd/system/
+cp "$SCRIPT_DIR/portal/portal.service" /etc/systemd/system/
 cp "$SCRIPT_DIR/wifi-retry.service" /etc/systemd/system/
 
 systemctl daemon-reload
-systemctl enable camera-server.service
+systemctl enable grabber.service
+systemctl enable playback.service
+systemctl enable backup.timer
+systemctl enable portal.service
 systemctl enable wifi-retry.service
 
-# --- 5. Configure tmpfs for minimal SD card wear ---
-echo "[5/5] Configuring tmpfs..."
-if ! grep -q "tmpfs /tmp" /etc/fstab 2>/dev/null; then
-    echo "tmpfs /tmp tmpfs defaults,noatime,nosuid,size=100m 0 0" >> /etc/fstab
-fi
-if ! grep -q "tmpfs /var/log" /etc/fstab 2>/dev/null; then
-    echo "tmpfs /var/log tmpfs defaults,noatime,nosuid,size=50m 0 0" >> /etc/fstab
-fi
+# --- 6. Disk monitor cron ---
+echo "[6/7] Installing disk monitor cron..."
+CRON_LINE="0 */6 * * * /opt/timelapse/disk_monitor.sh"
+(crontab -l 2>/dev/null | grep -v "disk_monitor.sh"; echo "$CRON_LINE") | crontab -
+
+# --- 7. System hardening ---
+echo "[7/7] System hardening..."
+
+# Disable swap to reduce SD card wear
+dphys-swapfile swapoff 2>/dev/null || true
+dphys-swapfile uninstall 2>/dev/null || true
+systemctl disable dphys-swapfile 2>/dev/null || true
+
+# Volatile journal (RAM only)
+mkdir -p /etc/systemd/journald.conf.d
+cat > /etc/systemd/journald.conf.d/volatile.conf <<EOF
+[Journal]
+Storage=volatile
+RuntimeMaxUse=30M
+EOF
 
 echo ""
 echo "=== Pi2 setup complete ==="
-echo "Services installed: camera-server, wifi-retry"
+echo "Services installed: grabber, playback, backup (timer), portal, wifi-retry"
 echo "Reboot to activate: sudo reboot"

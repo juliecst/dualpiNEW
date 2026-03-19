@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Pi2 — Camera Server
+Pi1 — Camera Server
 Runs two threads:
   1. Capture thread: calls rpicam-still in a loop, saves to /tmp/latest.jpg
   2. HTTP server thread: serves /tmp/latest.jpg on port 8080
@@ -178,7 +178,7 @@ def http_server_loop() -> None:
 # Main
 # ---------------------------------------------------------------------------
 def main() -> None:
-    log.info("Pi2 Camera Server starting (port=%d)", HTTP_PORT)
+    log.info("Pi1 Camera Server starting (port=%d)", HTTP_PORT)
 
     # Start HTTP server in a daemon thread
     http_thread = threading.Thread(target=http_server_loop, daemon=True)
