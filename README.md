@@ -330,7 +330,7 @@ The Samba share uses **guest authentication** — no username or password is req
 
 1. Connect your laptop to the `timelapse-ap` WiFi
 2. Access the Samba share:
-   - **macOS Finder:** ⌘K → `smb://guest@192.168.50.1/timelapse` — when prompted, select **Connect As: Guest**
+   - **macOS Finder:** ⌘K → `smb://guest@192.168.50.1/timelapse` (connects as guest automatically)
    - **macOS Terminal:** `open smb://guest@192.168.50.1/timelapse`
    - **Windows Explorer:** `\\192.168.50.1\timelapse` — when prompted, click **Guest** or leave credentials empty
    - **Linux file manager:** `smb://192.168.50.1/timelapse`
