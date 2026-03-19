@@ -84,22 +84,24 @@ touch /Volumes/bootfs/ssh
    sudo bash ~/pi2/setup.sh
    ```
 5. The script will:
-   - Install all dependencies (including `exfatprogs` for USB formatting)
-   - Detect and optionally format a USB stick as exFAT for local cache/render storage
-   - Configure WiFi client connection to Pi 1's AP
-   - Set up Samba mount with credential file for reliable guest authentication
-   - Configure the Waveshare 5-inch round display (DRM/KMS, blanking disabled)
-   - Enable all systemd services for autostart on boot
-6. Pi 2 will connect to Pi 1's AP, mount the Samba share, and start playback automatically
+    - Install all dependencies (including `exfatprogs` for USB formatting)
+    - Detect and optionally format a USB stick as exFAT for local cache/render storage
+    - Configure WiFi client connection to Pi 1's AP
+    - Set up a CIFS/Samba client mount of Pi 1's `timelapse` share at `/mnt/timelapse`
+    - Configure the Waveshare 5-inch round display (DRM/KMS, blanking disabled)
+    - Enable all systemd services for autostart on boot
+6. Pi 2 will connect to Pi 1's AP, mount the Samba share automatically, and `sync.service` will copy frames from `/mnt/timelapse` into Pi 2's local `/data/cache` directory for playback
 
 ### Daily power-off / power-on behavior
 
 The installation is safe to switch off at night and power back on in the morning:
 
-- **Both Pis autostart automatically.** All capture, portal, sync, playback, WiFi retry, Samba, and NTP services are enabled through systemd during setup.
+- **Both Pis autostart automatically.** Pi 1 enables the AP, Samba server, capture loop, portal, and NTP server. Pi 2 enables WiFi retry, the CIFS mount, sync loop, playback, and NTP client.
 - **Boot order does not need to be perfect.** Pi 2 keeps retrying the WiFi link and re-attempts the Samba mount until Pi 1 has finished bringing up its access point and file share.
 - **The handshake is session-based.** Pi 2 watches `session.id`; when it sees a new session it wipes its local cache and syncs the fresh frames, and when the session is unchanged it simply resumes syncing where it left off.
 - **Sudden power cuts are survivable.** The services use atomic temp-file renames for config, capture, sync, and backup markers, so incomplete writes are discarded on the next boot. Capture resumes from the last fully written frame number in the current session.
+
+> **Important:** Pi 2 is a **Samba client only**. It does **not** run `smbd`, `nmbd`, or a `samba.service`. On Pi 2, the important checks are the mounted share at `/mnt/timelapse` and the running `sync.service`, which copies frames onto Pi 2's own `/data/cache` storage.
 
 ### Re-enable autostart manually
 
@@ -501,6 +503,15 @@ sudo systemctl status disable-blanking.service
 
 ### Samba Mount Not Working on Pi 2
 ```bash
+# Pi 2 does not run a Samba server. This is expected:
+sudo systemctl status samba smbd nmbd
+
+# The service that matters on Pi 2 is the sync loop
+sudo systemctl status sync.service
+
+# Check WiFi link to Pi 1
+sudo systemctl status wifi-retry.service
+
 # Test connectivity
 ping -c 3 192.168.50.1
 
@@ -514,9 +525,20 @@ sudo mount -t cifs //192.168.50.1/timelapse /mnt/timelapse -o credentials=/etc/s
 df -h /mnt/timelapse
 ls /mnt/timelapse/current/
 
+# Check Pi 2's local cache (USB stick mounted at /data, or SD fallback)
+df -h /data
+ls /data/cache/
+
+# Watch the automatic sync loop
+journalctl -u sync.service --no-pager -n 50
+
 # Verify Pi 1's Samba config allows guest access
 # On Pi 1: testparm -s /etc/samba/smb.conf
 ```
+
+Pi 2 automatically copies frames from Pi 1 into `/data/cache` every 60 seconds.
+If a USB stick is mounted at `/data`, that cache lives on the USB stick; otherwise it
+falls back to the SD card.
 
 ### Samba Share Not Opening on macOS
 
