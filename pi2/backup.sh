@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Pi1 — Daily Backup
+# Pi2 — Daily Backup
 # Syncs /data/timelapse/ → /backup/ using rsync.
 # Triggered daily by backup.timer systemd timer.
 set -euo pipefail

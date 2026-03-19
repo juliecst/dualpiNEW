@@ -1,5 +1,5 @@
 [Unit]
-Description=Pi1 Timelapse Slideshow — mpv fullscreen playback
+Description=Pi2 Timelapse Slideshow — mpv fullscreen playback
 After=graphical.target grabber.service
 Wants=grabber.service
 

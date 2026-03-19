@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Pi1 — Flask Admin Portal
+Pi2 — Flask Admin Portal
 Optional web-based admin interface on port 80 for managing the timelapse system.
 
 Features:
   - View system status (disk, CPU, services)
   - Adjust capture interval, playback FPS
   - View latest captured images
-  - Check Pi2 camera health
+  - Check Pi1 camera health
   - Trigger manual backup
 """
 
@@ -105,11 +105,11 @@ def count_frames() -> int:
     return sum(1 for _ in timelapse_dir.rglob("*.jpg"))
 
 
-def check_pi2_health() -> dict:
-    """Check Pi2 camera server health endpoint."""
+def check_pi1_health() -> dict:
+    """Check Pi1 camera server health endpoint."""
     cfg = load_config()
-    pi2_ip = cfg.get("network", {}).get("pi2_ip", "192.168.50.20")
-    url = f"http://{pi2_ip}:8080/health"
+    pi1_ip = cfg.get("network", {}).get("pi1_ip", "192.168.50.1")
+    url = f"http://{pi1_ip}:8080/health"
     try:
         response = urlopen(url, timeout=5)
         return json.loads(response.read().decode())
@@ -177,14 +177,14 @@ DASHBOARD_HTML = """
             <div class="metric-label">{{ disk.percent }}% used, {{ disk.free_gb }} GB free</div>
         </div>
         <div class="card">
-            <h2>📷 Pi2 Camera</h2>
+            <h2>📷 Pi1 Camera</h2>
             <table>
                 <tr><td>Status</td><td>
-                    <span class="status {{ 'active' if pi2.status == 'ok' else 'inactive' }}">
-                        {{ pi2.status }}
+                    <span class="status {{ 'active' if pi1.status == 'ok' else 'inactive' }}">
+                        {{ pi1.status }}
                     </span>
                 </td></tr>
-                <tr><td>Last Capture</td><td>{{ pi2.get('last_capture', 'N/A') }}</td></tr>
+                <tr><td>Last Capture</td><td>{{ pi1.get('last_capture', 'N/A') }}</td></tr>
             </table>
         </div>
         <div class="card">
@@ -253,13 +253,11 @@ def dashboard():
         cpu_temp=get_cpu_temp(),
         disk=get_disk_usage("/data"),
         frame_count=count_frames(),
-        pi2=check_pi2_health(),
+        pi1=check_pi1_health(),
         uptime=uptime_str,
         services={
             "grabber": get_service_status("grabber"),
             "playback": get_service_status("playback"),
-            "hostapd": get_service_status("hostapd"),
-            "dnsmasq": get_service_status("dnsmasq"),
             "portal": get_service_status("portal"),
         },
     )
@@ -320,11 +318,10 @@ def api_status():
         "cpu_temp": get_cpu_temp(),
         "disk": get_disk_usage("/data"),
         "frame_count": count_frames(),
-        "pi2_health": check_pi2_health(),
+        "pi1_health": check_pi1_health(),
         "services": {
             "grabber": get_service_status("grabber"),
             "playback": get_service_status("playback"),
-            "hostapd": get_service_status("hostapd"),
         },
     })
 
@@ -338,7 +335,7 @@ def api_health():
 # Main
 # ---------------------------------------------------------------------------
 def main() -> None:
-    log.info("Pi1 Admin Portal starting on port %d", PORTAL_PORT)
+    log.info("Pi2 Admin Portal starting on port %d", PORTAL_PORT)
     app.run(host="0.0.0.0", port=PORTAL_PORT, debug=False)
 
 

@@ -1,5 +1,5 @@
 [Unit]
-Description=Pi1 Daily Timelapse Backup
+Description=Pi2 Daily Timelapse Backup
 After=local-fs.target
 
 [Service]
