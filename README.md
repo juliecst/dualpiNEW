@@ -326,12 +326,26 @@ lsblk -o NAME,SIZE,FSTYPE,UUID,MOUNTPOINT
 
 ### Via Samba from a Laptop
 
+The Samba share uses **guest authentication** — no username or password is required.
+
 1. Connect your laptop to the `timelapse-ap` WiFi
 2. Access the Samba share:
-   - **macOS Finder:** ⌘K → `smb://192.168.50.1/timelapse`
-   - **Windows Explorer:** `\\192.168.50.1\timelapse`
-   - **Linux:** `smb://192.168.50.1/timelapse`
+   - **macOS Finder:** ⌘K → `smb://guest@192.168.50.1/timelapse` — when prompted, select **Connect As: Guest**
+   - **macOS Terminal:** `open smb://guest@192.168.50.1/timelapse`
+   - **Windows Explorer:** `\\192.168.50.1\timelapse` — when prompted, click **Guest** or leave credentials empty
+   - **Linux file manager:** `smb://192.168.50.1/timelapse`
 3. Browse `archive/` for past sessions, `current/` for the active session
+
+> **macOS note:** Recent macOS versions (Ventura 13+) restrict guest SMB access.
+> If Finder shows the share but you cannot open it, use the Terminal command above
+> or go to **Finder → Go → Connect to Server** (⌘K) and enter
+> `smb://guest@192.168.50.1/timelapse`. When the login dialog appears, select
+> **Guest** and click **Connect**. If you still see an error, run the following
+> once in Terminal to allow guest connections system-wide and then reboot:
+> ```bash
+> # Allow insecure guest auth (safe on the air-gapped timelapse network)
+> sudo defaults write /Library/Preferences/com.apple.NetAuthAgent AllowUnconfirmedSMBGuest -bool true
+> ```
 
 ### Via SCP
 ```bash
@@ -503,6 +517,26 @@ ls /mnt/timelapse/current/
 # Verify Pi 1's Samba config allows guest access
 # On Pi 1: testparm -s /etc/samba/smb.conf
 ```
+
+### Samba Share Not Opening on macOS
+
+If the timelapse share appears in Finder's **Network** sidebar but you get
+"connection failed" or a blank window when opening it:
+
+```bash
+# 1. Connect explicitly as Guest from Terminal
+open smb://guest@192.168.50.1/timelapse
+
+# 2. If the above still fails, allow insecure guest auth (run once, reboot)
+sudo defaults write /Library/Preferences/com.apple.NetAuthAgent AllowUnconfirmedSMBGuest -bool true
+
+# 3. After reboot, retry:
+open smb://guest@192.168.50.1/timelapse
+```
+
+macOS Ventura (13+) blocks unauthenticated guest SMB connections by default.
+The `AllowUnconfirmedSMBGuest` preference re-enables them. This is safe on the
+air-gapped `timelapse-ap` network.
 
 ---
 

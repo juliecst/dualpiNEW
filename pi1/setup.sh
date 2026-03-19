@@ -37,7 +37,7 @@ info "Current time: $(date)"
 info "Updating apt and installing packages…"
 apt-get update -qq
 apt-get install -y \
-  hostapd dnsmasq chrony fake-hwclock samba samba-common-bin \
+  hostapd dnsmasq chrony fake-hwclock samba samba-common-bin samba-vfs-modules \
   python3-flask python3-pillow python3-pip \
   rpicam-apps rsync exfatprogs iptables \
   ffmpeg jq
