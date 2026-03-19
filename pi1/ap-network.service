@@ -1,0 +1,16 @@
+[Unit]
+Description=Pi1 AP Network — configure wlan0 static IP for hostapd
+DefaultDependencies=no
+Before=hostapd.service dnsmasq.service
+After=sys-subsystem-net-devices-wlan0.device
+BindsTo=sys-subsystem-net-devices-wlan0.device
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/sbin/ip link set wlan0 up
+ExecStart=/bin/sh -c '/sbin/ip addr flush dev wlan0 2>/dev/null || true'
+ExecStart=/sbin/ip addr add 192.168.50.1/24 dev wlan0
+
+[Install]
+WantedBy=multi-user.target

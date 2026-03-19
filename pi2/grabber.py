@@ -72,6 +72,13 @@ def fetch_and_save(pi1_url: str, output_dir: str, timeout: int) -> bool:
 
     try:
         response = urlopen(pi1_url, timeout=timeout)
+        content_type = response.headers.get("Content-Type", "")
+        if "image/jpeg" not in content_type:
+            log.warning(
+                "Unexpected Content-Type from Pi1: %s (expected image/jpeg), skipping",
+                content_type,
+            )
+            return False
         data = response.read()
 
         if len(data) < 1000:

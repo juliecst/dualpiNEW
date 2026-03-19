@@ -1,7 +1,7 @@
 [Unit]
 Description=Pi2 Timelapse Slideshow — mpv fullscreen playback
-After=graphical.target grabber.service
-Wants=grabber.service
+After=network-online.target grabber.service
+Wants=network-online.target grabber.service
 
 [Service]
 Type=simple
@@ -25,8 +25,11 @@ ExecStart=/bin/bash -c '\
         --really-quiet \
         --gpu-context=drm \
         --playlist=/tmp/timelapse_playlist.txt'
+# Restart every 5 minutes to regenerate playlist with newly captured frames.
+# At 0.2s/frame this gives smooth looping for ~1500 frames before a brief restart.
+RuntimeMaxSec=300
 Restart=always
-RestartSec=15
+RestartSec=5
 SupplementaryGroups=video render
 Environment=XDG_RUNTIME_DIR=/run/user/0
 StandardOutput=journal

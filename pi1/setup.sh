@@ -21,6 +21,7 @@ apt-get install -y --no-install-recommends \
     rpicam-apps \
     hostapd \
     dnsmasq \
+    dhcpcd5 \
     python3 \
     python3-yaml \
     python3-pip
@@ -79,6 +80,11 @@ unmanaged-devices=interface-name:wlan0
 NMEOF
     systemctl reload NetworkManager 2>/dev/null || systemctl restart NetworkManager
     echo "  NetworkManager: wlan0 set to unmanaged"
+
+    # Disable dhcpcd service to prevent conflicts with ap-network.service
+    systemctl stop dhcpcd 2>/dev/null || true
+    systemctl disable dhcpcd 2>/dev/null || true
+    echo "  dhcpcd disabled (ap-network.service manages wlan0 static IP)"
 fi
 
 # Deploy hostapd config with credentials from config.yaml
@@ -93,17 +99,27 @@ echo 'DAEMON_CONF="/etc/hostapd/hostapd.conf"' > /etc/default/hostapd
 # Deploy dnsmasq config
 cp "$SCRIPT_DIR/dnsmasq.conf" /etc/dnsmasq.d/timelapse.conf
 
-# Set static IP for wlan0 via dhcpcd
+# Set static IP for wlan0
+# On Bookworm with NetworkManager, dhcpcd is installed but disabled (see above).
+# Use a dedicated systemd service to configure the IP before hostapd starts.
+cp "$SCRIPT_DIR/ap-network.service" /etc/systemd/system/
+# Update the IP address in the deployed service file if PI1_IP is overridden.
+# Default (192.168.50.1) matches the source file, so this is a no-op unless customized.
+sed -i "s|192.168.50.1/24|${PI1_IP:-192.168.50.1}/24|" /etc/systemd/system/ap-network.service
+
+# Also configure via dhcpcd if it is available (legacy / non-Bookworm systems)
 DHCPCD_CONF="/etc/dhcpcd.conf"
-if ! grep -q "interface wlan0" "$DHCPCD_CONF" 2>/dev/null; then
-    cat >> "$DHCPCD_CONF" <<EOF
+if command -v dhcpcd &>/dev/null && [ -f "$DHCPCD_CONF" ]; then
+    if ! grep -q "interface wlan0" "$DHCPCD_CONF" 2>/dev/null; then
+        cat >> "$DHCPCD_CONF" <<EOF
 
 # Pi1 AP static IP
 interface wlan0
 static ip_address=192.168.50.1/24
 nohook wpa_supplicant
 EOF
-    echo "  Static IP 192.168.50.1 configured"
+        echo "  Static IP 192.168.50.1 configured via dhcpcd"
+    fi
 fi
 
 # Unmask and enable hostapd
@@ -116,6 +132,7 @@ echo "[4/6] Installing systemd services..."
 cp "$SCRIPT_DIR/camera-server.service" /etc/systemd/system/
 
 systemctl daemon-reload
+systemctl enable ap-network.service
 systemctl enable camera-server.service
 
 # --- 5. Configure tmpfs for minimal SD card wear ---

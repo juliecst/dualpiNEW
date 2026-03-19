@@ -18,9 +18,12 @@ cp "$SCRIPT_DIR/camera_server.py" "$INSTALL_DIR/camera_server.py"
 cp "$REPO_DIR/common/disk_monitor.sh" "$INSTALL_DIR/disk_monitor.sh"
 
 cp "$SCRIPT_DIR/camera-server.service" /etc/systemd/system/
+cp "$SCRIPT_DIR/ap-network.service" /etc/systemd/system/
 
 echo "[3/3] Restarting services..."
 systemctl daemon-reload
+systemctl enable ap-network.service
+systemctl restart ap-network.service
 systemctl restart camera-server.service
 
 echo "=== Pi1 update complete ==="

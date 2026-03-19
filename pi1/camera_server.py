@@ -133,7 +133,15 @@ class CameraHandler(BaseHTTPRequestHandler):
         else:
             self.send_error(404, "Not Found")
 
-    def _serve_image(self):
+    def do_HEAD(self):  # noqa: N802 — required by BaseHTTPRequestHandler interface
+        if self.path == "/latest.jpg":
+            self._serve_image(head_only=True)
+        elif self.path == "/health":
+            self._serve_health(head_only=True)
+        else:
+            self.send_error(404, "Not Found")
+
+    def _serve_image(self, head_only=False):
         try:
             with open(LATEST_JPG, "rb") as f:
                 data = f.read()
@@ -142,14 +150,15 @@ class CameraHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(data)))
             self.send_header("Cache-Control", "no-cache")
             self.end_headers()
-            self.wfile.write(data)
+            if not head_only:
+                self.wfile.write(data)
         except FileNotFoundError:
             self.send_error(503, "No image captured yet")
         except Exception as exc:
             log.error("Error serving image: %s", exc)
             self.send_error(500, "Internal Server Error")
 
-    def _serve_health(self):
+    def _serve_health(self, head_only=False):
         with capture_lock:
             ts = last_capture_time
         body = json.dumps({
@@ -160,7 +169,8 @@ class CameraHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(body.encode())
+        if not head_only:
+            self.wfile.write(body.encode())
 
     def log_message(self, fmt, *args):
         """Suppress default stderr logging; use our logger instead."""
