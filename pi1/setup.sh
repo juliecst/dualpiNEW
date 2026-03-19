@@ -100,7 +100,7 @@ echo 'DAEMON_CONF="/etc/hostapd/hostapd.conf"' > /etc/default/hostapd
 cp "$SCRIPT_DIR/dnsmasq.conf" /etc/dnsmasq.d/timelapse.conf
 
 # Set static IP for wlan0
-# On Bookworm, dhcpcd may not be installed (NetworkManager is default).
+# On Bookworm with NetworkManager, dhcpcd is installed but disabled (see above).
 # Use a dedicated systemd service to configure the IP before hostapd starts.
 cp "$SCRIPT_DIR/ap-network.service" /etc/systemd/system/
 # Update the IP address in the deployed service file if PI1_IP is overridden.
