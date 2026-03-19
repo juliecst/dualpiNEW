@@ -31,8 +31,32 @@ if [[ "$VIDEO_BACKUP_ENABLED" != "true" ]]; then
     exit 0
 fi
 
-# Count frames
-FRAME_COUNT=$(find "$CACHE_DIR" -maxdepth 1 -name 'frame_*.jpg' 2>/dev/null | wc -l)
+# Build a flat directory of numbered symlinks from archive + current frames
+RENDER_INPUT="/tmp/timelapse_render_input"
+cleanup() { rm -rf "$RENDER_INPUT"; }
+trap cleanup EXIT
+rm -rf "$RENDER_INPUT"
+mkdir -p "$RENDER_INPUT"
+
+COUNTER=0
+# Archive sessions first (sorted by session directory name for chronological order)
+ARCHIVE_DIR="${CACHE_DIR}/archive"
+if [[ -d "$ARCHIVE_DIR" ]]; then
+    for session_dir in $(find "$ARCHIVE_DIR" -mindepth 1 -maxdepth 1 -type d | sort); do
+        for frame in $(find "$session_dir" -maxdepth 1 -name 'frame_*.jpg' | sort); do
+            COUNTER=$((COUNTER + 1))
+            ln -sf "$frame" "${RENDER_INPUT}/$(printf 'frame_%06d.jpg' "$COUNTER")"
+        done
+    done
+fi
+
+# Current session frames
+for frame in $(find "$CACHE_DIR" -maxdepth 1 -name 'frame_*.jpg' | sort); do
+    COUNTER=$((COUNTER + 1))
+    ln -sf "$frame" "${RENDER_INPUT}/$(printf 'frame_%06d.jpg' "$COUNTER")"
+done
+
+FRAME_COUNT=$COUNTER
 if [[ "$FRAME_COUNT" -lt 2 ]]; then
     log "Only $FRAME_COUNT frames — skipping render"
     exit 0
@@ -54,7 +78,7 @@ log "Rendering $FRAME_COUNT frames at ${FPS}fps → $OUTPUT"
 ffmpeg -y \
     -framerate "$FPS" \
     -pattern_type glob \
-    -i "${CACHE_DIR}/frame_*.jpg" \
+    -i "${RENDER_INPUT}/frame_*.jpg" \
     -vf "deflicker=mode=pm:size=10" \
     -c:v libx264 \
     -preset medium \
